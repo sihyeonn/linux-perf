@@ -21,10 +21,8 @@ struct cls_mall_head {
 	struct tcf_result res;
 	u32 handle;
 	u32 flags;
-	union {
-		struct work_struct work;
-		struct rcu_head	rcu;
-	};
+	unsigned int in_hw_count;
+	struct rcu_work rwork;
 };
 
 static int mall_classify(struct sk_buff *skb, const struct tcf_proto *tp,
@@ -53,46 +51,41 @@ static void __mall_destroy(struct cls_mall_head *head)
 
 static void mall_destroy_work(struct work_struct *work)
 {
-	struct cls_mall_head *head = container_of(work, struct cls_mall_head,
-						  work);
+	struct cls_mall_head *head = container_of(to_rcu_work(work),
+						  struct cls_mall_head,
+						  rwork);
 	rtnl_lock();
 	__mall_destroy(head);
 	rtnl_unlock();
 }
 
-static void mall_destroy_rcu(struct rcu_head *rcu)
-{
-	struct cls_mall_head *head = container_of(rcu, struct cls_mall_head,
-						  rcu);
-
-	INIT_WORK(&head->work, mall_destroy_work);
-	tcf_queue_work(&head->work);
-}
-
 static void mall_destroy_hw_filter(struct tcf_proto *tp,
 				   struct cls_mall_head *head,
-				   unsigned long cookie)
+				   unsigned long cookie,
+				   struct netlink_ext_ack *extack)
 {
 	struct tc_cls_matchall_offload cls_mall = {};
 	struct tcf_block *block = tp->chain->block;
 
-	tc_cls_common_offload_init(&cls_mall.common, tp);
+	tc_cls_common_offload_init(&cls_mall.common, tp, head->flags, extack);
 	cls_mall.command = TC_CLSMATCHALL_DESTROY;
 	cls_mall.cookie = cookie;
 
 	tc_setup_cb_call(block, NULL, TC_SETUP_CLSMATCHALL, &cls_mall, false);
+	tcf_block_offload_dec(block, &head->flags);
 }
 
 static int mall_replace_hw_filter(struct tcf_proto *tp,
 				  struct cls_mall_head *head,
-				  unsigned long cookie)
+				  unsigned long cookie,
+				  struct netlink_ext_ack *extack)
 {
 	struct tc_cls_matchall_offload cls_mall = {};
 	struct tcf_block *block = tp->chain->block;
 	bool skip_sw = tc_skip_sw(head->flags);
 	int err;
 
-	tc_cls_common_offload_init(&cls_mall.common, tp);
+	tc_cls_common_offload_init(&cls_mall.common, tp, head->flags, extack);
 	cls_mall.command = TC_CLSMATCHALL_REPLACE;
 	cls_mall.exts = &head->exts;
 	cls_mall.cookie = cookie;
@@ -100,10 +93,11 @@ static int mall_replace_hw_filter(struct tcf_proto *tp,
 	err = tc_setup_cb_call(block, NULL, TC_SETUP_CLSMATCHALL,
 			       &cls_mall, skip_sw);
 	if (err < 0) {
-		mall_destroy_hw_filter(tp, head, cookie);
+		mall_destroy_hw_filter(tp, head, cookie, NULL);
 		return err;
 	} else if (err > 0) {
-		head->flags |= TCA_CLS_FLAGS_IN_HW;
+		head->in_hw_count = err;
+		tcf_block_offload_inc(block, &head->flags);
 	}
 
 	if (skip_sw && !(head->flags & TCA_CLS_FLAGS_IN_HW))
@@ -112,18 +106,20 @@ static int mall_replace_hw_filter(struct tcf_proto *tp,
 	return 0;
 }
 
-static void mall_destroy(struct tcf_proto *tp)
+static void mall_destroy(struct tcf_proto *tp, struct netlink_ext_ack *extack)
 {
 	struct cls_mall_head *head = rtnl_dereference(tp->root);
 
 	if (!head)
 		return;
 
+	tcf_unbind_filter(tp, &head->res);
+
 	if (!tc_skip_hw(head->flags))
-		mall_destroy_hw_filter(tp, head, (unsigned long) head);
+		mall_destroy_hw_filter(tp, head, (unsigned long) head, extack);
 
 	if (tcf_exts_get_net(&head->exts))
-		call_rcu(&head->rcu, mall_destroy_rcu);
+		tcf_queue_work(&head->rwork, mall_destroy_work);
 	else
 		__mall_destroy(head);
 }
@@ -141,11 +137,12 @@ static const struct nla_policy mall_policy[TCA_MATCHALL_MAX + 1] = {
 static int mall_set_parms(struct net *net, struct tcf_proto *tp,
 			  struct cls_mall_head *head,
 			  unsigned long base, struct nlattr **tb,
-			  struct nlattr *est, bool ovr)
+			  struct nlattr *est, bool ovr,
+			  struct netlink_ext_ack *extack)
 {
 	int err;
 
-	err = tcf_exts_validate(net, tp, tb, est, &head->exts, ovr);
+	err = tcf_exts_validate(net, tp, tb, est, &head->exts, ovr, extack);
 	if (err < 0)
 		return err;
 
@@ -159,7 +156,7 @@ static int mall_set_parms(struct net *net, struct tcf_proto *tp,
 static int mall_change(struct net *net, struct sk_buff *in_skb,
 		       struct tcf_proto *tp, unsigned long base,
 		       u32 handle, struct nlattr **tca,
-		       void **arg, bool ovr)
+		       void **arg, bool ovr, struct netlink_ext_ack *extack)
 {
 	struct cls_mall_head *head = rtnl_dereference(tp->root);
 	struct nlattr *tb[TCA_MATCHALL_MAX + 1];
@@ -197,12 +194,14 @@ static int mall_change(struct net *net, struct sk_buff *in_skb,
 	new->handle = handle;
 	new->flags = flags;
 
-	err = mall_set_parms(net, tp, new, base, tb, tca[TCA_RATE], ovr);
+	err = mall_set_parms(net, tp, new, base, tb, tca[TCA_RATE], ovr,
+			     extack);
 	if (err)
 		goto err_set_parms;
 
 	if (!tc_skip_hw(new->flags)) {
-		err = mall_replace_hw_filter(tp, new, (unsigned long) new);
+		err = mall_replace_hw_filter(tp, new, (unsigned long)new,
+					     extack);
 		if (err)
 			goto err_replace_hw_filter;
 	}
@@ -222,7 +221,8 @@ err_exts_init:
 	return err;
 }
 
-static int mall_delete(struct tcf_proto *tp, void *arg, bool *last)
+static int mall_delete(struct tcf_proto *tp, void *arg, bool *last,
+		       struct netlink_ext_ack *extack)
 {
 	return -EOPNOTSUPP;
 }
@@ -237,6 +237,35 @@ static void mall_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 		arg->stop = 1;
 skip:
 	arg->count++;
+}
+
+static int mall_reoffload(struct tcf_proto *tp, bool add, tc_setup_cb_t *cb,
+			  void *cb_priv, struct netlink_ext_ack *extack)
+{
+	struct cls_mall_head *head = rtnl_dereference(tp->root);
+	struct tc_cls_matchall_offload cls_mall = {};
+	struct tcf_block *block = tp->chain->block;
+	int err;
+
+	if (tc_skip_hw(head->flags))
+		return 0;
+
+	tc_cls_common_offload_init(&cls_mall.common, tp, head->flags, extack);
+	cls_mall.command = add ?
+		TC_CLSMATCHALL_REPLACE : TC_CLSMATCHALL_DESTROY;
+	cls_mall.exts = &head->exts;
+	cls_mall.cookie = (unsigned long)head;
+
+	err = cb(TC_SETUP_CLSMATCHALL, &cls_mall, cb_priv);
+	if (err) {
+		if (add && tc_skip_sw(head->flags))
+			return err;
+		return 0;
+	}
+
+	tc_cls_offload_cnt_update(block, &head->in_hw_count, &head->flags, add);
+
+	return 0;
 }
 
 static int mall_dump(struct net *net, struct tcf_proto *tp, void *fh,
@@ -293,6 +322,7 @@ static struct tcf_proto_ops cls_mall_ops __read_mostly = {
 	.change		= mall_change,
 	.delete		= mall_delete,
 	.walk		= mall_walk,
+	.reoffload	= mall_reoffload,
 	.dump		= mall_dump,
 	.bind_class	= mall_bind_class,
 	.owner		= THIS_MODULE,

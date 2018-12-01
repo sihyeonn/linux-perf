@@ -2174,16 +2174,16 @@ static int bcm2048_fops_release(struct file *file)
 	return 0;
 }
 
-static unsigned int bcm2048_fops_poll(struct file *file,
-				      struct poll_table_struct *pts)
+static __poll_t bcm2048_fops_poll(struct file *file,
+				  struct poll_table_struct *pts)
 {
 	struct bcm2048_device *bdev = video_drvdata(file);
-	int retval = 0;
+	__poll_t retval = 0;
 
 	poll_wait(file, &bdev->read_queue, pts);
 
 	if (bdev->rds_data_available)
-		retval = POLLIN | POLLRDNORM;
+		retval = EPOLLIN | EPOLLRDNORM;
 
 	return retval;
 }
@@ -2304,9 +2304,9 @@ static int bcm2048_vidioc_querycap(struct file *file, void *priv,
 {
 	struct bcm2048_device *bdev = video_get_drvdata(video_devdata(file));
 
-	strlcpy(capability->driver, BCM2048_DRIVER_NAME,
+	strscpy(capability->driver, BCM2048_DRIVER_NAME,
 		sizeof(capability->driver));
-	strlcpy(capability->card, BCM2048_DRIVER_CARD,
+	strscpy(capability->card, BCM2048_DRIVER_CARD,
 		sizeof(capability->card));
 	snprintf(capability->bus_info, 32, "I2C: 0x%X", bdev->client->addr);
 	capability->device_caps = V4L2_CAP_TUNER | V4L2_CAP_RADIO |

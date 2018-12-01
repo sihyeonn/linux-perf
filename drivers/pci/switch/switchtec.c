@@ -1,16 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Microsemi Switchtec(tm) PCIe Management Driver
  * Copyright (c) 2017, Microsemi Corporation
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms and conditions of the GNU General Public License,
- * version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
  */
 
 #include <linux/switchtec.h>
@@ -22,6 +13,8 @@
 #include <linux/uaccess.h>
 #include <linux/poll.h>
 #include <linux/wait.h>
+
+#include <linux/nospec.h>
 
 MODULE_DESCRIPTION("Microsemi Switchtec(tm) PCIe Management Driver");
 MODULE_VERSION("0.1");
@@ -510,25 +503,25 @@ out:
 		return -EBADMSG;
 }
 
-static unsigned int switchtec_dev_poll(struct file *filp, poll_table *wait)
+static __poll_t switchtec_dev_poll(struct file *filp, poll_table *wait)
 {
 	struct switchtec_user *stuser = filp->private_data;
 	struct switchtec_dev *stdev = stuser->stdev;
-	int ret = 0;
+	__poll_t ret = 0;
 
 	poll_wait(filp, &stuser->comp.wait, wait);
 	poll_wait(filp, &stdev->event_wq, wait);
 
 	if (lock_mutex_and_test_alive(stdev))
-		return POLLIN | POLLRDHUP | POLLOUT | POLLERR | POLLHUP;
+		return EPOLLIN | EPOLLRDHUP | EPOLLOUT | EPOLLERR | EPOLLHUP;
 
 	mutex_unlock(&stdev->mrpc_mutex);
 
 	if (try_wait_for_completion(&stuser->comp))
-		ret |= POLLIN | POLLRDNORM;
+		ret |= EPOLLIN | EPOLLRDNORM;
 
 	if (stuser->event_cnt != atomic_read(&stdev->event_cnt))
-		ret |= POLLPRI | POLLRDBAND;
+		ret |= EPOLLPRI | EPOLLRDBAND;
 
 	return ret;
 }
@@ -650,7 +643,7 @@ static int ioctl_event_summary(struct switchtec_dev *stdev,
 
 	for (i = 0; i < SWITCHTEC_MAX_PFF_CSR; i++) {
 		reg = ioread16(&stdev->mmio_pff_csr[i].vendor_id);
-		if (reg != MICROSEMI_VENDOR_ID)
+		if (reg != PCI_VENDOR_ID_MICROSEMI)
 			break;
 
 		reg = ioread32(&stdev->mmio_pff_csr[i].pff_event_summary);
@@ -707,6 +700,7 @@ static const struct event_reg {
 	EV_GLB(SWITCHTEC_IOCTL_EVENT_CLI_MRPC_COMP_ASYNC,
 	       cli_mrpc_comp_async_hdr),
 	EV_GLB(SWITCHTEC_IOCTL_EVENT_GPIO_INT, gpio_interrupt_hdr),
+	EV_GLB(SWITCHTEC_IOCTL_EVENT_GFMS, gfms_event_hdr),
 	EV_PAR(SWITCHTEC_IOCTL_EVENT_PART_RESET, part_reset_hdr),
 	EV_PAR(SWITCHTEC_IOCTL_EVENT_MRPC_COMP, mrpc_comp_hdr),
 	EV_PAR(SWITCHTEC_IOCTL_EVENT_MRPC_COMP_ASYNC, mrpc_comp_async_hdr),
@@ -917,6 +911,8 @@ static int ioctl_port_to_pff(struct switchtec_dev *stdev,
 	default:
 		if (p.port > ARRAY_SIZE(pcfg->dsp_pff_inst_id))
 			return -EINVAL;
+		p.port = array_index_nospec(p.port,
+					ARRAY_SIZE(pcfg->dsp_pff_inst_id) + 1);
 		p.pff = ioread32(&pcfg->dsp_pff_inst_id[p.port - 1]);
 		break;
 	}
@@ -1211,7 +1207,7 @@ static void init_pff(struct switchtec_dev *stdev)
 
 	for (i = 0; i < SWITCHTEC_MAX_PFF_CSR; i++) {
 		reg = ioread16(&stdev->mmio_pff_csr[i].vendor_id);
-		if (reg != MICROSEMI_VENDOR_ID)
+		if (reg != PCI_VENDOR_ID_MICROSEMI)
 			break;
 	}
 
@@ -1275,7 +1271,7 @@ static int switchtec_pci_probe(struct pci_dev *pdev,
 	struct switchtec_dev *stdev;
 	int rc;
 
-	if (pdev->class == MICROSEMI_NTB_CLASSCODE)
+	if (pdev->class == (PCI_CLASS_BRIDGE_OTHER << 8))
 		request_module_nowait("ntb_hw_switchtec");
 
 	stdev = stdev_create(pdev);
@@ -1329,19 +1325,19 @@ static void switchtec_pci_remove(struct pci_dev *pdev)
 
 #define SWITCHTEC_PCI_DEVICE(device_id) \
 	{ \
-		.vendor     = MICROSEMI_VENDOR_ID, \
+		.vendor     = PCI_VENDOR_ID_MICROSEMI, \
 		.device     = device_id, \
 		.subvendor  = PCI_ANY_ID, \
 		.subdevice  = PCI_ANY_ID, \
-		.class      = MICROSEMI_MGMT_CLASSCODE, \
+		.class      = (PCI_CLASS_MEMORY_OTHER << 8), \
 		.class_mask = 0xFFFFFFFF, \
 	}, \
 	{ \
-		.vendor     = MICROSEMI_VENDOR_ID, \
+		.vendor     = PCI_VENDOR_ID_MICROSEMI, \
 		.device     = device_id, \
 		.subvendor  = PCI_ANY_ID, \
 		.subdevice  = PCI_ANY_ID, \
-		.class      = MICROSEMI_NTB_CLASSCODE, \
+		.class      = (PCI_CLASS_BRIDGE_OTHER << 8), \
 		.class_mask = 0xFFFFFFFF, \
 	}
 
@@ -1352,6 +1348,8 @@ static const struct pci_device_id switchtec_pci_tbl[] = {
 	SWITCHTEC_PCI_DEVICE(0x8534),  //PFX 64xG3
 	SWITCHTEC_PCI_DEVICE(0x8535),  //PFX 80xG3
 	SWITCHTEC_PCI_DEVICE(0x8536),  //PFX 96xG3
+	SWITCHTEC_PCI_DEVICE(0x8541),  //PSX 24xG3
+	SWITCHTEC_PCI_DEVICE(0x8542),  //PSX 32xG3
 	SWITCHTEC_PCI_DEVICE(0x8543),  //PSX 48xG3
 	SWITCHTEC_PCI_DEVICE(0x8544),  //PSX 64xG3
 	SWITCHTEC_PCI_DEVICE(0x8545),  //PSX 80xG3

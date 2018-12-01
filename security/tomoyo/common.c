@@ -1660,7 +1660,8 @@ static void tomoyo_read_pid(struct tomoyo_io_buffer *head)
 	head->r.eof = true;
 	if (tomoyo_str_starts(&buf, "global-pid "))
 		global_pid = true;
-	pid = (unsigned int) simple_strtoul(buf, NULL, 10);
+	if (kstrtouint(buf, 10, &pid))
+		return;
 	rcu_read_lock();
 	if (global_pid)
 		p = find_task_by_pid_ns(pid, &init_pid_ns);
@@ -2116,17 +2117,17 @@ static struct tomoyo_domain_info *tomoyo_find_domain_by_qid
  * @file: Pointer to "struct file".
  * @wait: Pointer to "poll_table".
  *
- * Returns POLLIN | POLLRDNORM when ready to read, 0 otherwise.
+ * Returns EPOLLIN | EPOLLRDNORM when ready to read, 0 otherwise.
  *
  * Waits for access requests which violated policy in enforcing mode.
  */
-static unsigned int tomoyo_poll_query(struct file *file, poll_table *wait)
+static __poll_t tomoyo_poll_query(struct file *file, poll_table *wait)
 {
 	if (!list_empty(&tomoyo_query_list))
-		return POLLIN | POLLRDNORM;
+		return EPOLLIN | EPOLLRDNORM;
 	poll_wait(file, &tomoyo_query_wait, wait);
 	if (!list_empty(&tomoyo_query_list))
-		return POLLIN | POLLRDNORM;
+		return EPOLLIN | EPOLLRDNORM;
 	return 0;
 }
 
@@ -2450,15 +2451,15 @@ int tomoyo_open_control(const u8 type, struct file *file)
  * @file: Pointer to "struct file".
  * @wait: Pointer to "poll_table". Maybe NULL.
  *
- * Returns POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM if ready to read/write,
- * POLLOUT | POLLWRNORM otherwise.
+ * Returns EPOLLIN | EPOLLRDNORM | EPOLLOUT | EPOLLWRNORM if ready to read/write,
+ * EPOLLOUT | EPOLLWRNORM otherwise.
  */
-unsigned int tomoyo_poll_control(struct file *file, poll_table *wait)
+__poll_t tomoyo_poll_control(struct file *file, poll_table *wait)
 {
 	struct tomoyo_io_buffer *head = file->private_data;
 	if (head->poll)
-		return head->poll(file, wait) | POLLOUT | POLLWRNORM;
-	return POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM;
+		return head->poll(file, wait) | EPOLLOUT | EPOLLWRNORM;
+	return EPOLLIN | EPOLLRDNORM | EPOLLOUT | EPOLLWRNORM;
 }
 
 /**

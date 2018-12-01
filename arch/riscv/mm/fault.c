@@ -29,7 +29,6 @@
 
 #include <asm/pgalloc.h>
 #include <asm/ptrace.h>
-#include <asm/uaccess.h>
 
 /*
  * This routine handles page faults.  It determines the address and the
@@ -42,7 +41,8 @@ asmlinkage void do_page_fault(struct pt_regs *regs)
 	struct mm_struct *mm;
 	unsigned long addr, cause;
 	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
-	int fault, code = SEGV_MAPERR;
+	int code = SEGV_MAPERR;
+	vm_fault_t fault;
 
 	cause = regs->scause;
 	addr = regs->sbadaddr;
@@ -63,7 +63,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs)
 		goto vmalloc_fault;
 
 	/* Enable interrupts if they were enabled in the parent context. */
-	if (likely(regs->sstatus & SR_PIE))
+	if (likely(regs->sstatus & SR_SPIE))
 		local_irq_enable();
 
 	/*
@@ -239,6 +239,10 @@ vmalloc_fault:
 		 * Do _not_ use "tsk->active_mm->pgd" here.
 		 * We might be inside an interrupt in the middle
 		 * of a task switch.
+		 *
+		 * Note: Use the old spbtr name instead of using the current
+		 * satp name to support binutils 2.29 which doesn't know about
+		 * the privileged ISA 1.10 yet.
 		 */
 		index = pgd_index(addr);
 		pgd = (pgd_t *)pfn_to_virt(csr_read(sptbr)) + index;

@@ -7,7 +7,6 @@
 #include <linux/refcount.h>
 #include <linux/list.h>
 #include <api/fd/array.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include "../perf.h"
 #include "event.h"
@@ -31,7 +30,6 @@ struct perf_evlist {
 	int		 nr_entries;
 	int		 nr_groups;
 	int		 nr_mmaps;
-	bool		 overwrite;
 	bool		 enabled;
 	bool		 has_user_cpus;
 	size_t		 mmap_len;
@@ -45,12 +43,14 @@ struct perf_evlist {
 	} workload;
 	struct fdarray	 pollfd;
 	struct perf_mmap *mmap;
-	struct perf_mmap *backward_mmap;
+	struct perf_mmap *overwrite_mmap;
 	struct thread_map *threads;
 	struct cpu_map	  *cpus;
 	struct perf_evsel *selected;
 	struct events_stats stats;
 	struct perf_env	*env;
+	u64		first_sample_time;
+	u64		last_sample_time;
 };
 
 struct perf_evsel_str_handler {
@@ -98,9 +98,9 @@ void __perf_evlist__reset_sample_bit(struct perf_evlist *evlist,
 #define perf_evlist__reset_sample_bit(evlist, bit) \
 	__perf_evlist__reset_sample_bit(evlist, PERF_SAMPLE_##bit)
 
-int perf_evlist__set_filter(struct perf_evlist *evlist, const char *filter);
-int perf_evlist__set_filter_pid(struct perf_evlist *evlist, pid_t pid);
-int perf_evlist__set_filter_pids(struct perf_evlist *evlist, size_t npids, pid_t *pids);
+int perf_evlist__set_tp_filter(struct perf_evlist *evlist, const char *filter);
+int perf_evlist__set_tp_filter_pid(struct perf_evlist *evlist, pid_t pid);
+int perf_evlist__set_tp_filter_pids(struct perf_evlist *evlist, size_t npids, pid_t *pids);
 
 struct perf_evsel *
 perf_evlist__find_tracepoint_by_id(struct perf_evlist *evlist, int id);
@@ -128,14 +128,6 @@ struct perf_evsel *perf_evlist__id2evsel_strict(struct perf_evlist *evlist,
 struct perf_sample_id *perf_evlist__id2sid(struct perf_evlist *evlist, u64 id);
 
 void perf_evlist__toggle_bkw_mmap(struct perf_evlist *evlist, enum bkw_mmap_state state);
-
-union perf_event *perf_evlist__mmap_read(struct perf_evlist *evlist, int idx);
-
-union perf_event *perf_evlist__mmap_read_forward(struct perf_evlist *evlist,
-						 int idx);
-union perf_event *perf_evlist__mmap_read_backward(struct perf_evlist *evlist,
-						  int idx);
-void perf_evlist__mmap_read_catchup(struct perf_evlist *evlist, int idx);
 
 void perf_evlist__mmap_consume(struct perf_evlist *evlist, int idx);
 
@@ -169,10 +161,9 @@ int perf_evlist__parse_mmap_pages(const struct option *opt,
 unsigned long perf_event_mlock_kb_in_pages(void);
 
 int perf_evlist__mmap_ex(struct perf_evlist *evlist, unsigned int pages,
-			 bool overwrite, unsigned int auxtrace_pages,
-			 bool auxtrace_overwrite);
-int perf_evlist__mmap(struct perf_evlist *evlist, unsigned int pages,
-		      bool overwrite);
+			 unsigned int auxtrace_pages,
+			 bool auxtrace_overwrite, int nr_cblocks);
+int perf_evlist__mmap(struct perf_evlist *evlist, unsigned int pages);
 void perf_evlist__munmap(struct perf_evlist *evlist);
 
 size_t perf_evlist__mmap_size(unsigned long pages);
@@ -204,6 +195,10 @@ u16 perf_evlist__id_hdr_size(struct perf_evlist *evlist);
 
 int perf_evlist__parse_sample(struct perf_evlist *evlist, union perf_event *event,
 			      struct perf_sample *sample);
+
+int perf_evlist__parse_sample_timestamp(struct perf_evlist *evlist,
+					union perf_event *event,
+					u64 *timestamp);
 
 bool perf_evlist__valid_sample_type(struct perf_evlist *evlist);
 bool perf_evlist__valid_sample_id_all(struct perf_evlist *evlist);
@@ -312,4 +307,12 @@ perf_evlist__find_evsel_by_str(struct perf_evlist *evlist, const char *str);
 
 struct perf_evsel *perf_evlist__event2evsel(struct perf_evlist *evlist,
 					    union perf_event *event);
+
+bool perf_evlist__exclude_kernel(struct perf_evlist *evlist);
+
+void perf_evlist__force_leader(struct perf_evlist *evlist);
+
+struct perf_evsel *perf_evlist__reset_weak_group(struct perf_evlist *evlist,
+						 struct perf_evsel *evsel);
+
 #endif /* __PERF_EVLIST_H */

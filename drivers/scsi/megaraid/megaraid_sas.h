@@ -35,8 +35,8 @@
 /*
  * MegaRAID SAS Driver meta data
  */
-#define MEGASAS_VERSION				"07.703.05.00-rc1"
-#define MEGASAS_RELDATE				"October 5, 2017"
+#define MEGASAS_VERSION				"07.706.03.00-rc1"
+#define MEGASAS_RELDATE				"May 21, 2018"
 
 /*
  * Device IDs
@@ -197,6 +197,7 @@ enum MFI_CMD_OP {
 	MFI_CMD_ABORT		= 0x6,
 	MFI_CMD_SMP		= 0x7,
 	MFI_CMD_STP		= 0x8,
+	MFI_CMD_NVME		= 0x9,
 	MFI_CMD_OP_COUNT,
 	MFI_CMD_INVALID		= 0xff
 };
@@ -230,7 +231,7 @@ enum MFI_CMD_OP {
 /*
  * Global functions
  */
-extern u8 MR_ValidateMapInfo(struct megasas_instance *instance);
+extern u8 MR_ValidateMapInfo(struct megasas_instance *instance, u64 map_id);
 
 
 /*
@@ -708,7 +709,8 @@ struct MR_TARGET_PROPERTIES {
 	u32    max_io_size_kb;
 	u32    device_qdepth;
 	u32    sector_size;
-	u8     reserved[500];
+	u8     reset_tmo;
+	u8     reserved[499];
 } __packed;
 
  /*
@@ -1352,7 +1354,13 @@ struct megasas_ctrl_info {
 
 	struct {
 	#if defined(__BIG_ENDIAN_BITFIELD)
-		u16 reserved:8;
+		u16 reserved:2;
+		u16 support_nvme_passthru:1;
+		u16 support_pl_debug_info:1;
+		u16 support_flash_comp_info:1;
+		u16 support_host_info:1;
+		u16 support_dual_fw_update:1;
+		u16 support_ssc_rev3:1;
 		u16 fw_swaps_bbu_vpd_info:1;
 		u16 support_pd_map_target_id:1;
 		u16 support_ses_ctrl_in_multipathcfg:1;
@@ -1377,10 +1385,35 @@ struct megasas_ctrl_info {
 		 *  provide the data in little endian order
 		 */
 		u16 fw_swaps_bbu_vpd_info:1;
-		u16 reserved:8;
+		u16 support_ssc_rev3:1;
+		/* FW supports CacheCade 3.0, only one SSCD creation allowed */
+		u16 support_dual_fw_update:1;
+		/* FW supports dual firmware update feature */
+		u16 support_host_info:1;
+		/* FW supports MR_DCMD_CTRL_HOST_INFO_SET/GET */
+		u16 support_flash_comp_info:1;
+		/* FW supports MR_DCMD_CTRL_FLASH_COMP_INFO_GET */
+		u16 support_pl_debug_info:1;
+		/* FW supports retrieval of PL debug information through apps */
+		u16 support_nvme_passthru:1;
+		/* FW supports NVMe passthru commands */
+		u16 reserved:2;
 	#endif
 		} adapter_operations4;
 	u8 pad[0x800 - 0x7FE]; /* 0x7FE pad to 2K for expansion */
+
+	u32 size;
+	u32 pad1;
+
+	u8 reserved6[64];
+
+	u32 rsvdForAdptOp[64];
+
+	u8 reserved7[3];
+
+	u8 TaskAbortTO;	/* Timeout value in seconds used by Abort Task TM */
+	u8 MaxResetTO;	/* Max Supported Reset timeout in seconds. */
+	u8 reserved8[3];
 } __packed;
 
 /*
@@ -1453,6 +1486,7 @@ enum FW_BOOT_CONTEXT {
 #define MEGASAS_DEFAULT_CMD_TIMEOUT		90
 #define MEGASAS_THROTTLE_QUEUE_DEPTH		16
 #define MEGASAS_BLOCKED_CMD_TIMEOUT		60
+#define MEGASAS_DEFAULT_TM_TIMEOUT		50
 /*
  * FW reports the maximum of number of commands that it can accept (maximum
  * commands that can be outstanding) at any time. The driver must report a
@@ -1630,7 +1664,8 @@ union megasas_sgl_frame {
 typedef union _MFI_CAPABILITIES {
 	struct {
 #if   defined(__BIG_ENDIAN_BITFIELD)
-	u32     reserved:18;
+	u32     reserved:17;
+	u32	support_nvme_passthru:1;
 	u32     support_64bit_mode:1;
 	u32 support_pd_map_target_id:1;
 	u32     support_qd_throttling:1;
@@ -1660,7 +1695,8 @@ typedef union _MFI_CAPABILITIES {
 	u32     support_qd_throttling:1;
 	u32	support_pd_map_target_id:1;
 	u32     support_64bit_mode:1;
-	u32     reserved:18;
+	u32	support_nvme_passthru:1;
+	u32     reserved:17;
 #endif
 	} mfi_capabilities;
 	__le32		reg;
@@ -1894,7 +1930,9 @@ struct MR_PRIV_DEVICE {
 	bool is_tm_capable;
 	bool tm_busy;
 	atomic_t r1_ldio_hint;
-	u8   interface_type;
+	u8 interface_type;
+	u8 task_abort_tmo;
+	u8 target_reset_tmo;
 };
 struct megasas_cmd;
 
@@ -2107,6 +2145,7 @@ enum MR_PD_TYPE {
 
 struct megasas_instance {
 
+	unsigned int *reply_map;
 	__le32 *producer;
 	dma_addr_t producer_h;
 	__le32 *consumer;
@@ -2188,7 +2227,6 @@ struct megasas_instance {
 	struct megasas_evt_detail *evt_detail;
 	dma_addr_t evt_detail_h;
 	struct megasas_cmd *aen_cmd;
-	struct mutex hba_mutex;
 	struct semaphore ioctl_sem;
 
 	struct Scsi_Host *host;
@@ -2269,6 +2307,9 @@ struct megasas_instance {
 	u32 nvme_page_size;
 	u8 adapter_type;
 	bool consistent_mask_64bit;
+	bool support_nvme_passthru;
+	u8 task_abort_tmo;
+	u8 max_reset_tmo;
 };
 struct MR_LD_VF_MAP {
 	u32 size;
@@ -2490,7 +2531,11 @@ int megasas_get_ctrl_info(struct megasas_instance *instance);
 /* PD sequence */
 int
 megasas_sync_pd_seq_num(struct megasas_instance *instance, bool pend);
-void megasas_set_dynamic_target_properties(struct scsi_device *sdev);
+void megasas_set_dynamic_target_properties(struct scsi_device *sdev,
+					   bool is_target_prop);
+int megasas_get_target_prop(struct megasas_instance *instance,
+			    struct scsi_device *sdev);
+
 int megasas_set_crash_dump_params(struct megasas_instance *instance,
 	u8 crash_buf_state);
 void megasas_free_host_crash_buffer(struct megasas_instance *instance);

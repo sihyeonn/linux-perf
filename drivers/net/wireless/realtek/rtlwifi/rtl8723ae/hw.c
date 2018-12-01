@@ -799,11 +799,9 @@ static void _rtl8723e_hw_configure(struct ieee80211_hw *hw)
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	u8 reg_bw_opmode;
-	u32 reg_ratr, reg_prsr;
+	u32 reg_prsr;
 
 	reg_bw_opmode = BW_OPMODE_20MHZ;
-	reg_ratr = RATE_ALL_CCK | RATE_ALL_OFDM_AG |
-	    RATE_ALL_OFDM_1SS | RATE_ALL_OFDM_2SS;
 	reg_prsr = RATE_ALL_CCK | RATE_ALL_OFDM_AG;
 
 	rtl_write_byte(rtlpriv, REG_INIRTS_RATE_SEL, 0x8);
@@ -1340,14 +1338,13 @@ void rtl8723e_card_disable(struct ieee80211_hw *hw)
 }
 
 void rtl8723e_interrupt_recognized(struct ieee80211_hw *hw,
-				   u32 *p_inta, u32 *p_intb,
-				   u32 *p_intc, u32 *p_intd)
+				   struct rtl_int *intvec)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 
-	*p_inta = rtl_read_dword(rtlpriv, 0x3a0) & rtlpci->irq_mask[0];
-	rtl_write_dword(rtlpriv, 0x3a0, *p_inta);
+	intvec->inta = rtl_read_dword(rtlpriv, 0x3a0) & rtlpci->irq_mask[0];
+	rtl_write_dword(rtlpriv, 0x3a0, intvec->inta);
 }
 
 void rtl8723e_set_beacon_related_registers(struct ieee80211_hw *hw)

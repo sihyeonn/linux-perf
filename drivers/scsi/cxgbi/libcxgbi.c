@@ -784,7 +784,8 @@ cxgbi_check_route6(struct sockaddr *dst_addr, int ifindex)
 	csk->mtu = mtu;
 	csk->dst = dst;
 
-	if (ipv6_addr_any(&rt->rt6i_prefsrc.addr)) {
+	rt6_get_prefsrc(rt, &pref_saddr);
+	if (ipv6_addr_any(&pref_saddr)) {
 		struct inet6_dev *idev = ip6_dst_idev((struct dst_entry *)rt);
 
 		err = ipv6_dev_get_saddr(&init_net, idev ? idev->dev : NULL,
@@ -794,8 +795,6 @@ cxgbi_check_route6(struct sockaddr *dst_addr, int ifindex)
 				&daddr6->sin6_addr);
 			goto rel_rt;
 		}
-	} else {
-		pref_saddr = rt->rt6i_prefsrc.addr;
 	}
 
 	csk->csk_family = AF_INET6;
@@ -1914,7 +1913,7 @@ int cxgbi_conn_alloc_pdu(struct iscsi_task *task, u8 opcode)
 	if (task->sc) {
 		task->hdr = (struct iscsi_hdr *)tdata->skb->data;
 	} else {
-		task->hdr = kzalloc(SKB_TX_ISCSI_PDU_HEADER_MAX, GFP_KERNEL);
+		task->hdr = kzalloc(SKB_TX_ISCSI_PDU_HEADER_MAX, GFP_ATOMIC);
 		if (!task->hdr) {
 			__kfree_skb(tdata->skb);
 			tdata->skb = NULL;

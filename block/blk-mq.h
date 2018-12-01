@@ -7,6 +7,9 @@
 
 struct blk_mq_tag_set;
 
+/**
+ * struct blk_mq_ctx - State for a software queue facing the submitting CPUs
+ */
 struct blk_mq_ctx {
 	struct {
 		spinlock_t		lock;
@@ -33,8 +36,7 @@ int blk_mq_update_nr_requests(struct request_queue *q, unsigned int nr);
 void blk_mq_wake_waiters(struct request_queue *q);
 bool blk_mq_dispatch_rq_list(struct request_queue *, struct list_head *, bool);
 void blk_mq_flush_busy_ctxs(struct blk_mq_hw_ctx *hctx, struct list_head *list);
-bool blk_mq_get_driver_tag(struct request *rq, struct blk_mq_hw_ctx **hctx,
-				bool wait);
+bool blk_mq_get_driver_tag(struct request *rq);
 struct request *blk_mq_dequeue_from_ctx(struct blk_mq_hw_ctx *hctx,
 					struct blk_mq_ctx *start);
 
@@ -60,6 +62,11 @@ void blk_mq_request_bypass_insert(struct request *rq, bool run_queue);
 void blk_mq_insert_requests(struct blk_mq_hw_ctx *hctx, struct blk_mq_ctx *ctx,
 				struct list_head *list);
 
+/* Used by blk_insert_cloned_request() to issue request directly */
+blk_status_t blk_mq_request_issue_directly(struct request *rq);
+void blk_mq_try_issue_list_directly(struct blk_mq_hw_ctx *hctx,
+				    struct list_head *list);
+
 /*
  * CPU -> queue mappings
  */
@@ -81,9 +88,16 @@ extern int blk_mq_sysfs_register(struct request_queue *q);
 extern void blk_mq_sysfs_unregister(struct request_queue *q);
 extern void blk_mq_hctx_kobj_init(struct blk_mq_hw_ctx *hctx);
 
-extern void blk_mq_rq_timed_out(struct request *req, bool reserved);
-
 void blk_mq_release(struct request_queue *q);
+
+/**
+ * blk_mq_rq_state() - read the current MQ_RQ_* state of a request
+ * @rq: target request.
+ */
+static inline enum mq_rq_state blk_mq_rq_state(struct request *rq)
+{
+	return READ_ONCE(rq->state);
+}
 
 static inline struct blk_mq_ctx *__blk_mq_get_ctx(struct request_queue *q,
 					   unsigned int cpu)
@@ -137,7 +151,9 @@ static inline bool blk_mq_hw_queue_mapped(struct blk_mq_hw_ctx *hctx)
 }
 
 void blk_mq_in_flight(struct request_queue *q, struct hd_struct *part,
-			unsigned int inflight[2]);
+		      unsigned int inflight[2]);
+void blk_mq_in_flight_rw(struct request_queue *q, struct hd_struct *part,
+			 unsigned int inflight[2]);
 
 static inline void blk_mq_put_dispatch_budget(struct blk_mq_hw_ctx *hctx)
 {
@@ -186,6 +202,14 @@ static inline void blk_mq_put_driver_tag(struct request *rq)
 
 	hctx = blk_mq_map_queue(rq->q, rq->mq_ctx->cpu);
 	__blk_mq_put_driver_tag(hctx, rq);
+}
+
+static inline void blk_mq_clear_mq_map(struct blk_mq_tag_set *set)
+{
+	int cpu;
+
+	for_each_possible_cpu(cpu)
+		set->mq_map[cpu] = 0;
 }
 
 #endif

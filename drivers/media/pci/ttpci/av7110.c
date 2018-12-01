@@ -53,7 +53,7 @@
 
 #include <linux/dvb/frontend.h>
 
-#include "dvb_frontend.h"
+#include <media/dvb_frontend.h>
 
 #include "ttpci-eeprom.h"
 #include "av7110.h"
@@ -324,14 +324,15 @@ static int DvbDmxFilterCallback(u8 *buffer1, size_t buffer1_len,
 		}
 		return dvbdmxfilter->feed->cb.sec(buffer1, buffer1_len,
 						  buffer2, buffer2_len,
-						  &dvbdmxfilter->filter);
+						  &dvbdmxfilter->filter, NULL);
 	case DMX_TYPE_TS:
 		if (!(dvbdmxfilter->feed->ts_type & TS_PACKET))
 			return 0;
 		if (dvbdmxfilter->feed->ts_type & TS_PAYLOAD_ONLY)
 			return dvbdmxfilter->feed->cb.ts(buffer1, buffer1_len,
 							 buffer2, buffer2_len,
-							 &dvbdmxfilter->feed->feed.ts);
+							 &dvbdmxfilter->feed->feed.ts,
+							 NULL);
 		else
 			av7110_p2t_write(buffer1, buffer1_len,
 					 dvbdmxfilter->feed->pid,
@@ -2481,7 +2482,8 @@ static int av7110_attach(struct saa7146_dev* dev,
 	   get recognized before the main driver is fully loaded */
 	saa7146_write(dev, GPIO_CTRL, 0x500000);
 
-	strlcpy(av7110->i2c_adap.name, pci_ext->ext_priv, sizeof(av7110->i2c_adap.name));
+	strscpy(av7110->i2c_adap.name, pci_ext->ext_priv,
+		sizeof(av7110->i2c_adap.name));
 
 	saa7146_i2c_adapter_prepare(dev, &av7110->i2c_adap, SAA7146_I2C_BUS_BIT_RATE_120); /* 275 kHz */
 

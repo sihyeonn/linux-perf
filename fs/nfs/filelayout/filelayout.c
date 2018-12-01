@@ -895,9 +895,7 @@ fl_pnfs_update_layout(struct inode *ino,
 
 	lseg = pnfs_update_layout(ino, ctx, pos, count, iomode, strict_iomode,
 				  gfp_flags);
-	if (!lseg)
-		lseg = ERR_PTR(-ENOMEM);
-	if (IS_ERR(lseg))
+	if (IS_ERR_OR_NULL(lseg))
 		goto out;
 
 	lo = NFS_I(ino)->layout;
@@ -1166,6 +1164,7 @@ static struct pnfs_layoutdriver_type filelayout_type = {
 	.id			= LAYOUT_NFSV4_1_FILES,
 	.name			= "LAYOUT_NFSV4_1_FILES",
 	.owner			= THIS_MODULE,
+	.max_layoutget_response	= 4096, /* 1 page or so... */
 	.alloc_layout_hdr	= filelayout_alloc_layout_hdr,
 	.free_layout_hdr	= filelayout_free_layout_hdr,
 	.alloc_lseg		= filelayout_alloc_lseg,

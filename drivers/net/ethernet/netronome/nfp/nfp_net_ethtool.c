@@ -1,35 +1,5 @@
-/*
- * Copyright (C) 2015-2017 Netronome Systems, Inc.
- *
- * This software is dual licensed under the GNU General License Version 2,
- * June 1991 as shown in the file COPYING in the top-level directory of this
- * source tree or the BSD 2-Clause License provided below.  You have the
- * option to license this software under the complete terms of either license.
- *
- * The BSD 2-Clause License:
- *
- *     Redistribution and use in source and binary forms, with or
- *     without modification, are permitted provided that the following
- *     conditions are met:
- *
- *      1. Redistributions of source code must retain the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer.
- *
- *      2. Redistributions in binary form must reproduce the above
- *         copyright notice, this list of conditions and the following
- *         disclaimer in the documentation and/or other materials
- *         provided with the distribution.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
- * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
- * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
- * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
- * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
- * SOFTWARE.
- */
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/* Copyright (C) 2015-2018 Netronome Systems, Inc. */
 
 /*
  * nfp_net_ethtool.c
@@ -47,17 +17,15 @@
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/ethtool.h>
+#include <linux/firmware.h>
 
 #include "nfpcore/nfp.h"
 #include "nfpcore/nfp_nsp.h"
 #include "nfp_app.h"
+#include "nfp_main.h"
 #include "nfp_net_ctrl.h"
 #include "nfp_net.h"
 #include "nfp_port.h"
-
-enum nfp_dump_diag {
-	NFP_DUMP_NSP_DIAG = 0,
-};
 
 struct nfp_et_stat {
 	char name[ETH_GSTRING_LEN];
@@ -181,7 +149,7 @@ static const struct nfp_et_stat nfp_mac_et_stats[] = {
 
 #define NN_ET_GLOBAL_STATS_LEN ARRAY_SIZE(nfp_net_et_stats)
 #define NN_ET_SWITCH_STATS_LEN 9
-#define NN_RVEC_GATHER_STATS	8
+#define NN_RVEC_GATHER_STATS	9
 #define NN_RVEC_PER_Q_STATS	3
 
 static void nfp_net_get_nspinfo(struct nfp_app *app, char *version)
@@ -235,12 +203,10 @@ nfp_net_get_drvinfo(struct net_device *netdev, struct ethtool_drvinfo *drvinfo)
 static void
 nfp_app_get_drvinfo(struct net_device *netdev, struct ethtool_drvinfo *drvinfo)
 {
-	struct nfp_app *app;
+	struct nfp_app *app = nfp_app_from_netdev(netdev);
 
-	app = nfp_app_from_netdev(netdev);
-	if (!app)
-		return;
-
+	strlcpy(drvinfo->bus_info, pci_name(app->pdev),
+		sizeof(drvinfo->bus_info));
 	nfp_get_drvinfo(app, app->pdev, "*", drvinfo);
 }
 
@@ -333,7 +299,7 @@ nfp_net_get_link_ksettings(struct net_device *netdev,
 	    ls >= ARRAY_SIZE(ls_to_ethtool))
 		return 0;
 
-	cmd->base.speed = ls_to_ethtool[sts];
+	cmd->base.speed = ls_to_ethtool[ls];
 	cmd->base.duplex = DUPLEX_FULL;
 
 	return 0;
@@ -439,7 +405,7 @@ static int nfp_net_set_ringparam(struct net_device *netdev,
 	return nfp_net_set_ring_size(nn, rxd_cnt, txd_cnt);
 }
 
-static __printf(2, 3) u8 *nfp_pr_et(u8 *data, const char *fmt, ...)
+__printf(2, 3) u8 *nfp_pr_et(u8 *data, const char *fmt, ...)
 {
 	va_list args;
 
@@ -454,7 +420,7 @@ static unsigned int nfp_vnic_get_sw_stats_count(struct net_device *netdev)
 {
 	struct nfp_net *nn = netdev_priv(netdev);
 
-	return NN_RVEC_GATHER_STATS + nn->dp.num_r_vecs * NN_RVEC_PER_Q_STATS;
+	return NN_RVEC_GATHER_STATS + nn->max_r_vecs * NN_RVEC_PER_Q_STATS;
 }
 
 static u8 *nfp_vnic_get_sw_stats_strings(struct net_device *netdev, u8 *data)
@@ -462,7 +428,7 @@ static u8 *nfp_vnic_get_sw_stats_strings(struct net_device *netdev, u8 *data)
 	struct nfp_net *nn = netdev_priv(netdev);
 	int i;
 
-	for (i = 0; i < nn->dp.num_r_vecs; i++) {
+	for (i = 0; i < nn->max_r_vecs; i++) {
 		data = nfp_pr_et(data, "rvec_%u_rx_pkts", i);
 		data = nfp_pr_et(data, "rvec_%u_tx_pkts", i);
 		data = nfp_pr_et(data, "rvec_%u_tx_busy", i);
@@ -470,6 +436,7 @@ static u8 *nfp_vnic_get_sw_stats_strings(struct net_device *netdev, u8 *data)
 
 	data = nfp_pr_et(data, "hw_rx_csum_ok");
 	data = nfp_pr_et(data, "hw_rx_csum_inner_ok");
+	data = nfp_pr_et(data, "hw_rx_csum_complete");
 	data = nfp_pr_et(data, "hw_rx_csum_err");
 	data = nfp_pr_et(data, "rx_replace_buf_alloc_fail");
 	data = nfp_pr_et(data, "hw_tx_csum");
@@ -487,7 +454,7 @@ static u64 *nfp_vnic_get_sw_stats(struct net_device *netdev, u64 *data)
 	u64 tmp[NN_RVEC_GATHER_STATS];
 	unsigned int i, j;
 
-	for (i = 0; i < nn->dp.num_r_vecs; i++) {
+	for (i = 0; i < nn->max_r_vecs; i++) {
 		unsigned int start;
 
 		do {
@@ -495,18 +462,19 @@ static u64 *nfp_vnic_get_sw_stats(struct net_device *netdev, u64 *data)
 			data[0] = nn->r_vecs[i].rx_pkts;
 			tmp[0] = nn->r_vecs[i].hw_csum_rx_ok;
 			tmp[1] = nn->r_vecs[i].hw_csum_rx_inner_ok;
-			tmp[2] = nn->r_vecs[i].hw_csum_rx_error;
-			tmp[3] = nn->r_vecs[i].rx_replace_buf_alloc_fail;
+			tmp[2] = nn->r_vecs[i].hw_csum_rx_complete;
+			tmp[3] = nn->r_vecs[i].hw_csum_rx_error;
+			tmp[4] = nn->r_vecs[i].rx_replace_buf_alloc_fail;
 		} while (u64_stats_fetch_retry(&nn->r_vecs[i].rx_sync, start));
 
 		do {
 			start = u64_stats_fetch_begin(&nn->r_vecs[i].tx_sync);
 			data[1] = nn->r_vecs[i].tx_pkts;
 			data[2] = nn->r_vecs[i].tx_busy;
-			tmp[4] = nn->r_vecs[i].hw_csum_tx;
-			tmp[5] = nn->r_vecs[i].hw_csum_tx_inner;
-			tmp[6] = nn->r_vecs[i].tx_gather;
-			tmp[7] = nn->r_vecs[i].tx_lso;
+			tmp[5] = nn->r_vecs[i].hw_csum_tx;
+			tmp[6] = nn->r_vecs[i].hw_csum_tx_inner;
+			tmp[7] = nn->r_vecs[i].tx_gather;
+			tmp[8] = nn->r_vecs[i].tx_lso;
 		} while (u64_stats_fetch_retry(&nn->r_vecs[i].tx_sync, start));
 
 		data += NN_RVEC_PER_Q_STATS;
@@ -521,15 +489,13 @@ static u64 *nfp_vnic_get_sw_stats(struct net_device *netdev, u64 *data)
 	return data;
 }
 
-static unsigned int
-nfp_vnic_get_hw_stats_count(unsigned int rx_rings, unsigned int tx_rings)
+static unsigned int nfp_vnic_get_hw_stats_count(unsigned int num_vecs)
 {
-	return NN_ET_GLOBAL_STATS_LEN + (rx_rings + tx_rings) * 2;
+	return NN_ET_GLOBAL_STATS_LEN + num_vecs * 4;
 }
 
 static u8 *
-nfp_vnic_get_hw_stats_strings(u8 *data, unsigned int rx_rings,
-			      unsigned int tx_rings, bool repr)
+nfp_vnic_get_hw_stats_strings(u8 *data, unsigned int num_vecs, bool repr)
 {
 	int swap_off, i;
 
@@ -549,36 +515,29 @@ nfp_vnic_get_hw_stats_strings(u8 *data, unsigned int rx_rings,
 	for (i = NN_ET_SWITCH_STATS_LEN * 2; i < NN_ET_GLOBAL_STATS_LEN; i++)
 		data = nfp_pr_et(data, nfp_net_et_stats[i].name);
 
-	for (i = 0; i < tx_rings; i++) {
-		data = nfp_pr_et(data, "txq_%u_pkts", i);
-		data = nfp_pr_et(data, "txq_%u_bytes", i);
-	}
-
-	for (i = 0; i < rx_rings; i++) {
+	for (i = 0; i < num_vecs; i++) {
 		data = nfp_pr_et(data, "rxq_%u_pkts", i);
 		data = nfp_pr_et(data, "rxq_%u_bytes", i);
+		data = nfp_pr_et(data, "txq_%u_pkts", i);
+		data = nfp_pr_et(data, "txq_%u_bytes", i);
 	}
 
 	return data;
 }
 
 static u64 *
-nfp_vnic_get_hw_stats(u64 *data, u8 __iomem *mem,
-		      unsigned int rx_rings, unsigned int tx_rings)
+nfp_vnic_get_hw_stats(u64 *data, u8 __iomem *mem, unsigned int num_vecs)
 {
 	unsigned int i;
 
 	for (i = 0; i < NN_ET_GLOBAL_STATS_LEN; i++)
 		*data++ = readq(mem + nfp_net_et_stats[i].off);
 
-	for (i = 0; i < tx_rings; i++) {
-		*data++ = readq(mem + NFP_NET_CFG_TXR_STATS(i));
-		*data++ = readq(mem + NFP_NET_CFG_TXR_STATS(i) + 8);
-	}
-
-	for (i = 0; i < rx_rings; i++) {
+	for (i = 0; i < num_vecs; i++) {
 		*data++ = readq(mem + NFP_NET_CFG_RXR_STATS(i));
 		*data++ = readq(mem + NFP_NET_CFG_RXR_STATS(i) + 8);
+		*data++ = readq(mem + NFP_NET_CFG_TXR_STATS(i));
+		*data++ = readq(mem + NFP_NET_CFG_TXR_STATS(i) + 8);
 	}
 
 	return data;
@@ -633,10 +592,10 @@ static void nfp_net_get_strings(struct net_device *netdev,
 	switch (stringset) {
 	case ETH_SS_STATS:
 		data = nfp_vnic_get_sw_stats_strings(netdev, data);
-		data = nfp_vnic_get_hw_stats_strings(data, nn->dp.num_rx_rings,
-						     nn->dp.num_tx_rings,
+		data = nfp_vnic_get_hw_stats_strings(data, nn->max_r_vecs,
 						     false);
 		data = nfp_mac_get_stats_strings(netdev, data);
+		data = nfp_app_port_get_stats_strings(nn->port, data);
 		break;
 	}
 }
@@ -648,9 +607,9 @@ nfp_net_get_stats(struct net_device *netdev, struct ethtool_stats *stats,
 	struct nfp_net *nn = netdev_priv(netdev);
 
 	data = nfp_vnic_get_sw_stats(netdev, data);
-	data = nfp_vnic_get_hw_stats(data, nn->dp.ctrl_bar,
-				     nn->dp.num_rx_rings, nn->dp.num_tx_rings);
+	data = nfp_vnic_get_hw_stats(data, nn->dp.ctrl_bar, nn->max_r_vecs);
 	data = nfp_mac_get_stats(netdev, data);
+	data = nfp_app_port_get_stats(nn->port, data);
 }
 
 static int nfp_net_get_sset_count(struct net_device *netdev, int sset)
@@ -660,9 +619,9 @@ static int nfp_net_get_sset_count(struct net_device *netdev, int sset)
 	switch (sset) {
 	case ETH_SS_STATS:
 		return nfp_vnic_get_sw_stats_count(netdev) +
-		       nfp_vnic_get_hw_stats_count(nn->dp.num_rx_rings,
-						   nn->dp.num_tx_rings) +
-		       nfp_mac_get_stats_count(netdev);
+		       nfp_vnic_get_hw_stats_count(nn->max_r_vecs) +
+		       nfp_mac_get_stats_count(netdev) +
+		       nfp_app_port_get_stats_count(nn->port);
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -676,9 +635,10 @@ static void nfp_port_get_strings(struct net_device *netdev,
 	switch (stringset) {
 	case ETH_SS_STATS:
 		if (nfp_port_is_vnic(port))
-			data = nfp_vnic_get_hw_stats_strings(data, 0, 0, true);
+			data = nfp_vnic_get_hw_stats_strings(data, 0, true);
 		else
 			data = nfp_mac_get_stats_strings(netdev, data);
+		data = nfp_app_port_get_stats_strings(port, data);
 		break;
 	}
 }
@@ -690,9 +650,10 @@ nfp_port_get_stats(struct net_device *netdev, struct ethtool_stats *stats,
 	struct nfp_port *port = nfp_port_from_netdev(netdev);
 
 	if (nfp_port_is_vnic(port))
-		data = nfp_vnic_get_hw_stats(data, port->vnic, 0, 0);
+		data = nfp_vnic_get_hw_stats(data, port->vnic, 0);
 	else
 		data = nfp_mac_get_stats(netdev, data);
+	data = nfp_app_port_get_stats(port, data);
 }
 
 static int nfp_port_get_sset_count(struct net_device *netdev, int sset)
@@ -703,9 +664,10 @@ static int nfp_port_get_sset_count(struct net_device *netdev, int sset)
 	switch (sset) {
 	case ETH_SS_STATS:
 		if (nfp_port_is_vnic(port))
-			count = nfp_vnic_get_hw_stats_count(0, 0);
+			count = nfp_vnic_get_hw_stats_count(0);
 		else
 			count = nfp_mac_get_stats_count(netdev);
+		count += nfp_app_port_get_stats_count(port);
 		return count;
 	default:
 		return -EOPNOTSUPP;
@@ -1066,15 +1028,34 @@ exit_release:
 	return ret;
 }
 
+/* Set the dump flag/level. Calculate the dump length for flag > 0 only (new TLV
+ * based dumps), since flag 0 (default) calculates the length in
+ * nfp_app_get_dump_flag(), and we need to support triggering a level 0 dump
+ * without setting the flag first, for backward compatibility.
+ */
 static int nfp_app_set_dump(struct net_device *netdev, struct ethtool_dump *val)
 {
 	struct nfp_app *app = nfp_app_from_netdev(netdev);
+	s64 len;
 
 	if (!app)
 		return -EOPNOTSUPP;
 
-	if (val->flag != NFP_DUMP_NSP_DIAG)
-		return -EINVAL;
+	if (val->flag == NFP_DUMP_NSP_DIAG) {
+		app->pf->dump_flag = val->flag;
+		return 0;
+	}
+
+	if (!app->pf->dumpspec)
+		return -EOPNOTSUPP;
+
+	len = nfp_net_dump_calculate_size(app->pf, app->pf->dumpspec,
+					  val->flag);
+	if (len < 0)
+		return len;
+
+	app->pf->dump_flag = val->flag;
+	app->pf->dump_len = len;
 
 	return 0;
 }
@@ -1082,14 +1063,37 @@ static int nfp_app_set_dump(struct net_device *netdev, struct ethtool_dump *val)
 static int
 nfp_app_get_dump_flag(struct net_device *netdev, struct ethtool_dump *dump)
 {
-	return nfp_dump_nsp_diag(nfp_app_from_netdev(netdev), dump, NULL);
+	struct nfp_app *app = nfp_app_from_netdev(netdev);
+
+	if (!app)
+		return -EOPNOTSUPP;
+
+	if (app->pf->dump_flag == NFP_DUMP_NSP_DIAG)
+		return nfp_dump_nsp_diag(app, dump, NULL);
+
+	dump->flag = app->pf->dump_flag;
+	dump->len = app->pf->dump_len;
+
+	return 0;
 }
 
 static int
 nfp_app_get_dump_data(struct net_device *netdev, struct ethtool_dump *dump,
 		      void *buffer)
 {
-	return nfp_dump_nsp_diag(nfp_app_from_netdev(netdev), dump, buffer);
+	struct nfp_app *app = nfp_app_from_netdev(netdev);
+
+	if (!app)
+		return -EOPNOTSUPP;
+
+	if (app->pf->dump_flag == NFP_DUMP_NSP_DIAG)
+		return nfp_dump_nsp_diag(app, dump, buffer);
+
+	dump->flag = app->pf->dump_flag;
+	dump->len = app->pf->dump_len;
+
+	return nfp_net_dump_populate_buffer(app->pf, app->pf->dumpspec, dump,
+					    buffer);
 }
 
 static int nfp_net_set_coalesce(struct net_device *netdev,
@@ -1230,6 +1234,57 @@ static int nfp_net_set_channels(struct net_device *netdev,
 	return nfp_net_set_num_rings(nn, total_rx, total_tx);
 }
 
+static int
+nfp_net_flash_device(struct net_device *netdev, struct ethtool_flash *flash)
+{
+	const struct firmware *fw;
+	struct nfp_app *app;
+	struct nfp_nsp *nsp;
+	struct device *dev;
+	int err;
+
+	if (flash->region != ETHTOOL_FLASH_ALL_REGIONS)
+		return -EOPNOTSUPP;
+
+	app = nfp_app_from_netdev(netdev);
+	if (!app)
+		return -EOPNOTSUPP;
+
+	dev = &app->pdev->dev;
+
+	nsp = nfp_nsp_open(app->cpp);
+	if (IS_ERR(nsp)) {
+		err = PTR_ERR(nsp);
+		dev_err(dev, "Failed to access the NSP: %d\n", err);
+		return err;
+	}
+
+	err = request_firmware_direct(&fw, flash->data, dev);
+	if (err)
+		goto exit_close_nsp;
+
+	dev_info(dev, "Please be patient while writing flash image: %s\n",
+		 flash->data);
+	dev_hold(netdev);
+	rtnl_unlock();
+
+	err = nfp_nsp_write_flash(nsp, fw);
+	if (err < 0) {
+		dev_err(dev, "Flash write failed: %d\n", err);
+		goto exit_rtnl_lock;
+	}
+	dev_info(dev, "Finished writing flash image\n");
+
+exit_rtnl_lock:
+	rtnl_lock();
+	dev_put(netdev);
+	release_firmware(fw);
+
+exit_close_nsp:
+	nfp_nsp_close(nsp);
+	return err;
+}
+
 static const struct ethtool_ops nfp_net_ethtool_ops = {
 	.get_drvinfo		= nfp_net_get_drvinfo,
 	.get_link		= ethtool_op_get_link,
@@ -1240,6 +1295,7 @@ static const struct ethtool_ops nfp_net_ethtool_ops = {
 	.get_sset_count		= nfp_net_get_sset_count,
 	.get_rxnfc		= nfp_net_get_rxnfc,
 	.set_rxnfc		= nfp_net_set_rxnfc,
+	.flash_device		= nfp_net_flash_device,
 	.get_rxfh_indir_size	= nfp_net_get_rxfh_indir_size,
 	.get_rxfh_key_size	= nfp_net_get_rxfh_key_size,
 	.get_rxfh		= nfp_net_get_rxfh,
@@ -1265,6 +1321,7 @@ const struct ethtool_ops nfp_port_ethtool_ops = {
 	.get_strings		= nfp_port_get_strings,
 	.get_ethtool_stats	= nfp_port_get_stats,
 	.get_sset_count		= nfp_port_get_sset_count,
+	.flash_device		= nfp_net_flash_device,
 	.set_dump		= nfp_app_set_dump,
 	.get_dump_flag		= nfp_app_get_dump_flag,
 	.get_dump_data		= nfp_app_get_dump_data,

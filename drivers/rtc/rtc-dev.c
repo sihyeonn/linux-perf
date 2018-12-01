@@ -194,7 +194,7 @@ rtc_dev_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 	return ret;
 }
 
-static unsigned int rtc_dev_poll(struct file *file, poll_table *wait)
+static __poll_t rtc_dev_poll(struct file *file, poll_table *wait)
 {
 	struct rtc_device *rtc = file->private_data;
 	unsigned long data;
@@ -203,7 +203,7 @@ static unsigned int rtc_dev_poll(struct file *file, poll_table *wait)
 
 	data = rtc->irq_data;
 
-	return (data != 0) ? (POLLIN | POLLRDNORM) : 0;
+	return (data != 0) ? (EPOLLIN | EPOLLRDNORM) : 0;
 }
 
 static long rtc_dev_ioctl(struct file *file,
@@ -341,11 +341,11 @@ static long rtc_dev_ioctl(struct file *file,
 		return rtc_set_time(rtc, &tm);
 
 	case RTC_PIE_ON:
-		err = rtc_irq_set_state(rtc, NULL, 1);
+		err = rtc_irq_set_state(rtc, 1);
 		break;
 
 	case RTC_PIE_OFF:
-		err = rtc_irq_set_state(rtc, NULL, 0);
+		err = rtc_irq_set_state(rtc, 0);
 		break;
 
 	case RTC_AIE_ON:
@@ -365,7 +365,7 @@ static long rtc_dev_ioctl(struct file *file,
 		return rtc_update_irq_enable(rtc, 0);
 
 	case RTC_IRQP_SET:
-		err = rtc_irq_set_freq(rtc, NULL, arg);
+		err = rtc_irq_set_freq(rtc, arg);
 		break;
 
 	case RTC_IRQP_READ:
@@ -427,7 +427,7 @@ static int rtc_dev_release(struct inode *inode, struct file *file)
 	/* Keep ioctl until all drivers are converted */
 	rtc_dev_ioctl(file, RTC_UIE_OFF, 0);
 	rtc_update_irq_enable(rtc, 0);
-	rtc_irq_set_state(rtc, NULL, 0);
+	rtc_irq_set_state(rtc, 0);
 
 	clear_bit_unlock(RTC_DEV_BUSY, &rtc->flags);
 	return 0;

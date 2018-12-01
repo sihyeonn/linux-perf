@@ -25,7 +25,7 @@ static int qla2x00_error_entry(scsi_qla_host_t *, struct rsp_que *,
 
 /**
  * qla2100_intr_handler() - Process interrupts for the ISP2100 and ISP2200.
- * @irq:
+ * @irq: interrupt number
  * @dev_id: SCSI driver HA context
  *
  * Called by system whenever the host adapter generates an interrupt.
@@ -144,7 +144,7 @@ qla2x00_check_reg16_for_disconnect(scsi_qla_host_t *vha, uint16_t reg)
 
 /**
  * qla2300_intr_handler() - Process interrupts for the ISP23xx and ISP63xx.
- * @irq:
+ * @irq: interrupt number
  * @dev_id: SCSI driver HA context
  *
  * Called by system whenever the host adapter generates an interrupt.
@@ -259,7 +259,7 @@ qla2300_intr_handler(int irq, void *dev_id)
 
 /**
  * qla2x00_mbx_completion() - Process mailbox command completions.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
  * @mb0: Mailbox0 register
  */
 static void
@@ -272,7 +272,8 @@ qla2x00_mbx_completion(scsi_qla_host_t *vha, uint16_t mb0)
 	struct device_reg_2xxx __iomem *reg = &ha->iobase->isp;
 
 	/* Read all mbox registers? */
-	mboxes = (1 << ha->mbx_count) - 1;
+	WARN_ON_ONCE(ha->mbx_count > 32);
+	mboxes = (1ULL << ha->mbx_count) - 1;
 	if (!ha->mcp)
 		ql_dbg(ql_dbg_async, vha, 0x5001, "MBX pointer ERROR.\n");
 	else
@@ -612,7 +613,8 @@ qla2x00_find_fcport_by_nportid(scsi_qla_host_t *vha, port_id_t *id,
 
 /**
  * qla2x00_async_event() - Process aynchronous events.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
+ * @rsp: response queue
  * @mb: Mailbox registers (0 - 3)
  */
 void
@@ -628,6 +630,9 @@ qla2x00_async_event(scsi_qla_host_t *vha, struct rsp_que *rsp, uint16_t *mb)
 	uint32_t	rscn_entry, host_pid;
 	unsigned long	flags;
 	fc_port_t	*fcport = NULL;
+
+	if (!vha->hw->flags.fw_started)
+		return;
 
 	/* Setup to process RIO completion. */
 	handle_cnt = 0;
@@ -766,7 +771,6 @@ skip_rio:
 
 	case MBA_LIP_OCCURRED:		/* Loop Initialization Procedure */
 		ha->flags.lip_ae = 1;
-		ha->flags.n2n_ae = 0;
 
 		ql_dbg(ql_dbg_async, vha, 0x5009,
 		    "LIP occurred (%x).\n", mb[1]);
@@ -809,7 +813,7 @@ skip_rio:
 		break;
 
 	case MBA_LOOP_DOWN:		/* Loop Down Event */
-		ha->flags.n2n_ae = 0;
+		SAVE_TOPO(ha);
 		ha->flags.lip_ae = 0;
 		ha->current_topology = 0;
 
@@ -883,7 +887,6 @@ skip_rio:
 	/* case MBA_DCBX_COMPLETE: */
 	case MBA_POINT_TO_POINT:	/* Point-to-Point */
 		ha->flags.lip_ae = 0;
-		ha->flags.n2n_ae = 1;
 
 		if (IS_QLA2100(ha))
 			break;
@@ -908,7 +911,8 @@ skip_rio:
 			if (!atomic_read(&vha->loop_down_timer))
 				atomic_set(&vha->loop_down_timer,
 				    LOOP_DOWN_TIME);
-			qla2x00_mark_all_devices_lost(vha, 1);
+			if (!N2N_TOPO(ha))
+				qla2x00_mark_all_devices_lost(vha, 1);
 		}
 
 		if (vha->vp_idx) {
@@ -922,7 +926,6 @@ skip_rio:
 		set_bit(REGISTER_FC4_NEEDED, &vha->dpc_flags);
 		set_bit(REGISTER_FDMI_NEEDED, &vha->dpc_flags);
 
-		ha->flags.gpsc_supported = 1;
 		vha->flags.management_server_logged_in = 0;
 		break;
 
@@ -1009,7 +1012,7 @@ skip_rio:
 			if (qla_ini_mode_enabled(vha)) {
 				qla2x00_mark_device_lost(fcport->vha, fcport, 1, 1);
 				fcport->logout_on_delete = 0;
-				qlt_schedule_sess_for_deletion_lock(fcport);
+				qlt_schedule_sess_for_deletion(fcport);
 			}
 			break;
 
@@ -1059,8 +1062,7 @@ global_port_update:
 		 * Mark all devices as missing so we will login again.
 		 */
 		atomic_set(&vha->loop_state, LOOP_UP);
-
-		qla2x00_mark_all_devices_lost(vha, 1);
+		vha->scan.scan_retry = 0;
 
 		set_bit(LOOP_RESYNC_NEEDED, &vha->dpc_flags);
 		set_bit(LOCAL_LOOP_UPDATE, &vha->dpc_flags);
@@ -1202,6 +1204,7 @@ global_port_update:
 				qla2xxx_wake_dpc(vha);
 			}
 		}
+		/* fall through */
 	case MBA_IDC_COMPLETE:
 		if (ha->notify_lb_portup_comp && !vha->vp_idx)
 			complete(&ha->lb_portup_comp);
@@ -1255,7 +1258,8 @@ global_port_update:
 
 /**
  * qla2x00_process_completed_request() - Process a Fast Post response.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
+ * @req: request queue
  * @index: SRB index
  */
 void
@@ -1574,7 +1578,7 @@ qla24xx_els_ct_entry(scsi_qla_host_t *vha, struct req_que *req,
 		/* borrowing sts_entry_24xx.comp_status.
 		   same location as ct_entry_24xx.comp_status
 		 */
-		res = qla2x00_chk_ms_status(vha, (ms_iocb_entry_t *)pkt,
+		res = qla2x00_chk_ms_status(sp->vha, (ms_iocb_entry_t *)pkt,
 			(struct ct_sns_rsp *)sp->u.iocb_cmd.u.ctarg.rsp,
 			sp->name);
 		sp->done(sp, res);
@@ -1769,7 +1773,7 @@ qla24xx_logio_entry(scsi_qla_host_t *vha, struct req_que *req,
 				set_bit(ISP_ABORT_NEEDED, &vha->dpc_flags);
 			qla2xxx_wake_dpc(vha);
 		}
-		/* drop through */
+		/* fall through */
 	default:
 		data[0] = MBS_COMMAND_ERROR;
 		break;
@@ -1838,31 +1842,24 @@ qla24xx_tm_iocb_entry(scsi_qla_host_t *vha, struct req_que *req, void *tsk)
 	sp->done(sp, 0);
 }
 
-static void
-qla24xx_nvme_iocb_entry(scsi_qla_host_t *vha, struct req_que *req, void *tsk)
+static void qla24xx_nvme_iocb_entry(scsi_qla_host_t *vha, struct req_que *req,
+    void *tsk, srb_t *sp)
 {
-	const char func[] = "NVME-IOCB";
 	fc_port_t *fcport;
-	srb_t *sp;
 	struct srb_iocb *iocb;
 	struct sts_entry_24xx *sts = (struct sts_entry_24xx *)tsk;
 	uint16_t        state_flags;
 	struct nvmefc_fcp_req *fd;
-	uint16_t        ret = 0;
-	struct srb_iocb *nvme;
-
-	sp = qla2x00_get_sp_from_handle(vha, func, req, tsk);
-	if (!sp)
-		return;
+	uint16_t        ret = QLA_SUCCESS;
+	uint16_t	comp_status = le16_to_cpu(sts->comp_status);
 
 	iocb = &sp->u.iocb_cmd;
 	fcport = sp->fcport;
-	iocb->u.nvme.comp_status = le16_to_cpu(sts->comp_status);
+	iocb->u.nvme.comp_status = comp_status;
 	state_flags  = le16_to_cpu(sts->state_flags);
 	fd = iocb->u.nvme.desc;
-	nvme = &sp->u.iocb_cmd;
 
-	if (unlikely(nvme->u.nvme.aen_op))
+	if (unlikely(iocb->u.nvme.aen_op))
 		atomic_dec(&sp->vha->hw->nvme_active_aen_cnt);
 
 	/*
@@ -1896,49 +1893,75 @@ qla24xx_nvme_iocb_entry(scsi_qla_host_t *vha, struct req_que *req, void *tsk)
 	fd->transferred_length = fd->payload_length -
 	    le32_to_cpu(sts->residual_len);
 
+	if (unlikely(comp_status != CS_COMPLETE))
+		ql_log(ql_log_warn, fcport->vha, 0x5060,
+		   "NVME-%s ERR Handling - hdl=%x status(%x) tr_len:%x resid=%x  ox_id=%x\n",
+		   sp->name, sp->handle, comp_status,
+		   fd->transferred_length, le32_to_cpu(sts->residual_len),
+		   sts->ox_id);
+
 	/*
 	 * If transport error then Failure (HBA rejects request)
 	 * otherwise transport will handle.
 	 */
-	if (sts->entry_status) {
-		ql_log(ql_log_warn, fcport->vha, 0x5038,
-		    "NVME-%s error - hdl=%x entry-status(%x).\n",
-		    sp->name, sp->handle, sts->entry_status);
+	switch (comp_status) {
+	case CS_COMPLETE:
+		break;
+
+	case CS_RESET:
+	case CS_PORT_UNAVAILABLE:
+	case CS_PORT_LOGGED_OUT:
+		fcport->nvme_flag |= NVME_FLAG_RESETTING;
+		/* fall through */
+	case CS_ABORTED:
+	case CS_PORT_BUSY:
+		fd->transferred_length = 0;
+		iocb->u.nvme.rsp_pyld_len = 0;
+		ret = QLA_ABORTED;
+		break;
+	case CS_DATA_UNDERRUN:
+		break;
+	default:
 		ret = QLA_FUNCTION_FAILED;
-	} else  {
-		switch (le16_to_cpu(sts->comp_status)) {
-			case CS_COMPLETE:
-				ret = 0;
-			break;
-
-			case CS_ABORTED:
-			case CS_RESET:
-			case CS_PORT_UNAVAILABLE:
-			case CS_PORT_LOGGED_OUT:
-			case CS_PORT_BUSY:
-				ql_log(ql_log_warn, fcport->vha, 0x5060,
-				"NVME-%s ERR Handling - hdl=%x completion status(%x) resid=%x  ox_id=%x\n",
-				sp->name, sp->handle, sts->comp_status,
-				le32_to_cpu(sts->residual_len), sts->ox_id);
-				fd->transferred_length = fd->payload_length;
-				ret = QLA_ABORTED;
-			break;
-
-			default:
-				ql_log(ql_log_warn, fcport->vha, 0x5060,
-				"NVME-%s error - hdl=%x completion status(%x) resid=%x  ox_id=%x\n",
-				sp->name, sp->handle, sts->comp_status,
-				le32_to_cpu(sts->residual_len), sts->ox_id);
-				ret = QLA_FUNCTION_FAILED;
-				break;
-		}
+		break;
 	}
 	sp->done(sp, ret);
 }
 
+static void qla_ctrlvp_completed(scsi_qla_host_t *vha, struct req_que *req,
+    struct vp_ctrl_entry_24xx *vce)
+{
+	const char func[] = "CTRLVP-IOCB";
+	srb_t *sp;
+	int rval = QLA_SUCCESS;
+
+	sp = qla2x00_get_sp_from_handle(vha, func, req, vce);
+	if (!sp)
+		return;
+
+	if (vce->entry_status != 0) {
+		ql_dbg(ql_dbg_vport, vha, 0x10c4,
+		    "%s: Failed to complete IOCB -- error status (%x)\n",
+		    sp->name, vce->entry_status);
+		rval = QLA_FUNCTION_FAILED;
+	} else if (vce->comp_status != cpu_to_le16(CS_COMPLETE)) {
+		ql_dbg(ql_dbg_vport, vha, 0x10c5,
+		    "%s: Failed to complete IOCB -- completion status (%x) vpidx %x\n",
+		    sp->name, le16_to_cpu(vce->comp_status),
+		    le16_to_cpu(vce->vp_idx_failed));
+		rval = QLA_FUNCTION_FAILED;
+	} else {
+		ql_dbg(ql_dbg_vport, vha, 0x10c6,
+		    "Done %s.\n", __func__);
+	}
+
+	sp->rc = rval;
+	sp->done(sp, rval);
+}
+
 /**
  * qla2x00_process_response_queue() - Process response queue entries.
- * @ha: SCSI driver HA context
+ * @rsp: response queue
  */
 void
 qla2x00_process_response_queue(struct rsp_que *rsp)
@@ -2163,7 +2186,7 @@ qla2x00_handle_dif_error(srb_t *sp, struct sts_entry_24xx *sts24)
 		    0x10, 0x1);
 		set_driver_byte(cmd, DRIVER_SENSE);
 		set_host_byte(cmd, DID_ABORT);
-		cmd->result |= SAM_STAT_CHECK_CONDITION << 1;
+		cmd->result |= SAM_STAT_CHECK_CONDITION;
 		return 1;
 	}
 
@@ -2173,7 +2196,7 @@ qla2x00_handle_dif_error(srb_t *sp, struct sts_entry_24xx *sts24)
 		    0x10, 0x3);
 		set_driver_byte(cmd, DRIVER_SENSE);
 		set_host_byte(cmd, DID_ABORT);
-		cmd->result |= SAM_STAT_CHECK_CONDITION << 1;
+		cmd->result |= SAM_STAT_CHECK_CONDITION;
 		return 1;
 	}
 
@@ -2183,7 +2206,7 @@ qla2x00_handle_dif_error(srb_t *sp, struct sts_entry_24xx *sts24)
 		    0x10, 0x2);
 		set_driver_byte(cmd, DRIVER_SENSE);
 		set_host_byte(cmd, DID_ABORT);
-		cmd->result |= SAM_STAT_CHECK_CONDITION << 1;
+		cmd->result |= SAM_STAT_CHECK_CONDITION;
 		return 1;
 	}
 
@@ -2336,13 +2359,14 @@ done:
 	bsg_job->reply_len = sizeof(struct fc_bsg_reply);
 	/* Always return DID_OK, bsg will send the vendor specific response
 	 * in this case only */
-	sp->done(sp, DID_OK << 6);
+	sp->done(sp, DID_OK << 16);
 
 }
 
 /**
  * qla2x00_status_entry() - Process a Status IOCB entry.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
+ * @rsp: response queue
  * @pkt: Entry pointer
  */
 static void
@@ -2369,7 +2393,6 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 	int res = 0;
 	uint16_t state_flags = 0;
 	uint16_t retry_delay = 0;
-	uint8_t no_logout = 0;
 
 	sts = (sts_entry_t *) pkt;
 	sts24 = (struct sts_entry_24xx *) pkt;
@@ -2428,7 +2451,8 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 
 	/* NVME completion. */
 	if (sp->type == SRB_NVME_CMD) {
-		qla24xx_nvme_iocb_entry(vha, req, pkt);
+		req->outstanding_cmds[handle] = NULL;
+		qla24xx_nvme_iocb_entry(vha, req, pkt, sp);
 		return;
 	}
 
@@ -2482,8 +2506,12 @@ qla2x00_status_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, void *pkt)
 		ox_id = le16_to_cpu(sts24->ox_id);
 		par_sense_len = sizeof(sts24->data);
 		/* Valid values of the retry delay timer are 0x1-0xffef */
-		if (sts24->retry_delay > 0 && sts24->retry_delay < 0xfff1)
-			retry_delay = sts24->retry_delay;
+		if (sts24->retry_delay > 0 && sts24->retry_delay < 0xfff1) {
+			retry_delay = sts24->retry_delay & 0x3fff;
+			ql_dbg(ql_dbg_io, sp->vha, 0x3033,
+			    "%s: scope=%#x retry_delay=%#x\n", __func__,
+			    sts24->retry_delay >> 14, retry_delay);
+		}
 	} else {
 		if (scsi_status & SS_SENSE_LEN_VALID)
 			sense_len = le16_to_cpu(sts->req_sense_length);
@@ -2640,7 +2668,6 @@ check_scsi_status:
 		break;
 
 	case CS_PORT_LOGGED_OUT:
-		no_logout = 1;
 	case CS_PORT_CONFIG_CHG:
 	case CS_PORT_BUSY:
 	case CS_INCOMPLETE:
@@ -2671,11 +2698,8 @@ check_scsi_status:
 				port_state_str[atomic_read(&fcport->state)],
 				comp_status);
 
-			if (no_logout)
-				fcport->logout_on_delete = 0;
-
 			qla2x00_mark_device_lost(fcport->vha, fcport, 1, 1);
-			qlt_schedule_sess_for_deletion_lock(fcport);
+			qlt_schedule_sess_for_deletion(fcport);
 		}
 
 		break;
@@ -2724,7 +2748,7 @@ out:
 
 /**
  * qla2x00_status_cont_entry() - Process a Status Continuations entry.
- * @ha: SCSI driver HA context
+ * @rsp: response queue
  * @pkt: Entry pointer
  *
  * Extended sense data.
@@ -2782,7 +2806,8 @@ qla2x00_status_cont_entry(struct rsp_que *rsp, sts_cont_entry_t *pkt)
 
 /**
  * qla2x00_error_entry() - Process an error entry.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
+ * @rsp: response queue
  * @pkt: Entry pointer
  * return : 1=allow further error analysis. 0=no additional error analysis.
  */
@@ -2820,6 +2845,7 @@ qla2x00_error_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, sts_entry_t *pkt)
 	case ELS_IOCB_TYPE:
 	case ABORT_IOCB_TYPE:
 	case MBX_IOCB_TYPE:
+	default:
 		sp = qla2x00_get_sp_from_handle(vha, func, req, pkt);
 		if (sp) {
 			sp->done(sp, res);
@@ -2830,7 +2856,6 @@ qla2x00_error_entry(scsi_qla_host_t *vha, struct rsp_que *rsp, sts_entry_t *pkt)
 	case ABTS_RESP_24XX:
 	case CTIO_TYPE7:
 	case CTIO_CRC2:
-	default:
 		return 1;
 	}
 fatal:
@@ -2841,7 +2866,7 @@ fatal:
 
 /**
  * qla24xx_mbx_completion() - Process mailbox command completions.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
  * @mb0: Mailbox0 register
  */
 static void
@@ -2854,7 +2879,8 @@ qla24xx_mbx_completion(scsi_qla_host_t *vha, uint16_t mb0)
 	struct device_reg_24xx __iomem *reg = &ha->iobase->isp24;
 
 	/* Read all mbox registers? */
-	mboxes = (1 << ha->mbx_count) - 1;
+	WARN_ON_ONCE(ha->mbx_count > 32);
+	mboxes = (1ULL << ha->mbx_count) - 1;
 	if (!ha->mcp)
 		ql_dbg(ql_dbg_async, vha, 0x504e, "MBX pointer ERROR.\n");
 	else
@@ -2909,7 +2935,8 @@ void qla24xx_nvme_ls4_iocb(struct scsi_qla_host *vha,
 
 /**
  * qla24xx_process_response_queue() - Process response queue entries.
- * @ha: SCSI driver HA context
+ * @vha: SCSI driver HA context
+ * @rsp: response queue
  */
 void qla24xx_process_response_queue(struct scsi_qla_host *vha,
 	struct rsp_que *rsp)
@@ -2972,9 +2999,9 @@ process_err:
 				    (response_t *)pkt);
 				break;
 			} else {
-				/* drop through */
 				qlt_24xx_process_atio_queue(vha, 1);
 			}
+			/* fall through */
 		case ABTS_RESP_24XX:
 		case CTIO_TYPE7:
 		case CTIO_CRC2:
@@ -3004,6 +3031,10 @@ process_err:
 		case MBX_IOCB_TYPE:
 			qla24xx_mbx_iocb_entry(vha, rsp->req,
 			    (struct mbx_24xx_entry *)pkt);
+			break;
+		case VP_CTRL_IOCB_TYPE:
+			qla_ctrlvp_completed(vha, rsp->req,
+			    (struct vp_ctrl_entry_24xx *)pkt);
 			break;
 		default:
 			/* Type Not Supported. */
@@ -3078,7 +3109,7 @@ done:
 
 /**
  * qla24xx_intr_handler() - Process interrupts for the ISP23xx and ISP24xx.
- * @irq:
+ * @irq: interrupt number
  * @dev_id: SCSI driver HA context
  *
  * Called by system whenever the host adapter generates an interrupt.
@@ -3098,6 +3129,7 @@ qla24xx_intr_handler(int irq, void *dev_id)
 	uint16_t	mb[8];
 	struct rsp_que *rsp;
 	unsigned long	flags;
+	bool process_atio = false;
 
 	rsp = (struct rsp_que *) dev_id;
 	if (!rsp) {
@@ -3158,22 +3190,13 @@ qla24xx_intr_handler(int irq, void *dev_id)
 			qla24xx_process_response_queue(vha, rsp);
 			break;
 		case INTR_ATIO_QUE_UPDATE_27XX:
-		case INTR_ATIO_QUE_UPDATE:{
-			unsigned long flags2;
-			spin_lock_irqsave(&ha->tgt.atio_lock, flags2);
-			qlt_24xx_process_atio_queue(vha, 1);
-			spin_unlock_irqrestore(&ha->tgt.atio_lock, flags2);
+		case INTR_ATIO_QUE_UPDATE:
+			process_atio = true;
 			break;
-		}
-		case INTR_ATIO_RSP_QUE_UPDATE: {
-			unsigned long flags2;
-			spin_lock_irqsave(&ha->tgt.atio_lock, flags2);
-			qlt_24xx_process_atio_queue(vha, 1);
-			spin_unlock_irqrestore(&ha->tgt.atio_lock, flags2);
-
+		case INTR_ATIO_RSP_QUE_UPDATE:
+			process_atio = true;
 			qla24xx_process_response_queue(vha, rsp);
 			break;
-		}
 		default:
 			ql_dbg(ql_dbg_async, vha, 0x504f,
 			    "Unrecognized interrupt type (%d).\n", stat * 0xff);
@@ -3186,6 +3209,12 @@ qla24xx_intr_handler(int irq, void *dev_id)
 	}
 	qla2x00_handle_mbx_completion(ha, status);
 	spin_unlock_irqrestore(&ha->hardware_lock, flags);
+
+	if (process_atio) {
+		spin_lock_irqsave(&ha->tgt.atio_lock, flags);
+		qlt_24xx_process_atio_queue(vha, 0);
+		spin_unlock_irqrestore(&ha->tgt.atio_lock, flags);
+	}
 
 	return IRQ_HANDLED;
 }
@@ -3233,6 +3262,7 @@ qla24xx_msix_default(int irq, void *dev_id)
 	uint32_t	hccr;
 	uint16_t	mb[8];
 	unsigned long flags;
+	bool process_atio = false;
 
 	rsp = (struct rsp_que *) dev_id;
 	if (!rsp) {
@@ -3289,22 +3319,13 @@ qla24xx_msix_default(int irq, void *dev_id)
 			qla24xx_process_response_queue(vha, rsp);
 			break;
 		case INTR_ATIO_QUE_UPDATE_27XX:
-		case INTR_ATIO_QUE_UPDATE:{
-			unsigned long flags2;
-			spin_lock_irqsave(&ha->tgt.atio_lock, flags2);
-			qlt_24xx_process_atio_queue(vha, 1);
-			spin_unlock_irqrestore(&ha->tgt.atio_lock, flags2);
+		case INTR_ATIO_QUE_UPDATE:
+			process_atio = true;
 			break;
-		}
-		case INTR_ATIO_RSP_QUE_UPDATE: {
-			unsigned long flags2;
-			spin_lock_irqsave(&ha->tgt.atio_lock, flags2);
-			qlt_24xx_process_atio_queue(vha, 1);
-			spin_unlock_irqrestore(&ha->tgt.atio_lock, flags2);
-
+		case INTR_ATIO_RSP_QUE_UPDATE:
+			process_atio = true;
 			qla24xx_process_response_queue(vha, rsp);
 			break;
-		}
 		default:
 			ql_dbg(ql_dbg_async, vha, 0x5051,
 			    "Unrecognized interrupt type (%d).\n", stat & 0xff);
@@ -3314,6 +3335,12 @@ qla24xx_msix_default(int irq, void *dev_id)
 	} while (0);
 	qla2x00_handle_mbx_completion(ha, status);
 	spin_unlock_irqrestore(&ha->hardware_lock, flags);
+
+	if (process_atio) {
+		spin_lock_irqsave(&ha->tgt.atio_lock, flags);
+		qlt_24xx_process_atio_queue(vha, 0);
+		spin_unlock_irqrestore(&ha->tgt.atio_lock, flags);
+	}
 
 	return IRQ_HANDLED;
 }
@@ -3419,8 +3446,9 @@ qla24xx_enable_msix(struct qla_hw_data *ha, struct rsp_que *rsp)
 			    "Adjusted Max no of queues pairs: %d.\n", ha->max_qpairs);
 		}
 	}
-	ha->msix_entries = kzalloc(sizeof(struct qla_msix_entry) *
-				ha->msix_count, GFP_KERNEL);
+	ha->msix_entries = kcalloc(ha->msix_count,
+				   sizeof(struct qla_msix_entry),
+				   GFP_KERNEL);
 	if (!ha->msix_entries) {
 		ql_log(ql_log_fatal, vha, 0x00c8,
 		    "Failed to allocate memory for ha->msix_entries.\n");

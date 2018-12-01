@@ -102,9 +102,9 @@ struct lowcore {
 	__u64	current_task;			/* 0x0338 */
 	__u64	kernel_stack;			/* 0x0340 */
 
-	/* Interrupt, panic and restart stack. */
+	/* Interrupt, DAT-off and restartstack. */
 	__u64	async_stack;			/* 0x0348 */
-	__u64	panic_stack;			/* 0x0350 */
+	__u64	nodat_stack;			/* 0x0350 */
 	__u64	restart_stack;			/* 0x0358 */
 
 	/* Restart function and parameter. */
@@ -136,7 +136,11 @@ struct lowcore {
 	__u64	vdso_per_cpu_data;		/* 0x03b8 */
 	__u64	machine_flags;			/* 0x03c0 */
 	__u64	gmap;				/* 0x03c8 */
-	__u8	pad_0x03d0[0x0e00-0x03d0];	/* 0x03d0 */
+	__u8	pad_0x03d0[0x0400-0x03d0];	/* 0x03d0 */
+
+	/* br %r1 trampoline */
+	__u16	br_r1_trampoline;		/* 0x0400 */
+	__u8	pad_0x0402[0x0e00-0x0402];	/* 0x0402 */
 
 	/*
 	 * 0xe00 contains the address of the IPL Parameter Information
@@ -151,7 +155,8 @@ struct lowcore {
 	__u8	pad_0x0e20[0x0f00-0x0e20];	/* 0x0e20 */
 
 	/* Extended facility list */
-	__u64	stfle_fac_list[32];		/* 0x0f00 */
+	__u64	stfle_fac_list[16];		/* 0x0f00 */
+	__u64	alt_stfle_fac_list[16];		/* 0x0f80 */
 	__u8	pad_0x1000[0x11b0-0x1000];	/* 0x1000 */
 
 	/* Pointer to the machine check extended save area */
@@ -180,7 +185,7 @@ struct lowcore {
 	/* Transaction abort diagnostic block */
 	__u8	pgm_tdb[256];			/* 0x1800 */
 	__u8	pad_0x1900[0x2000-0x1900];	/* 0x1900 */
-} __packed;
+} __packed __aligned(8192);
 
 #define S390_lowcore (*((struct lowcore *) 0))
 

@@ -261,8 +261,8 @@ struct saa7134_card_ir {
 #define SAA7134_BOARD_SABRENT_TV_PCB05     115
 #define SAA7134_BOARD_10MOONSTVMASTER3     116
 #define SAA7134_BOARD_AVERMEDIA_SUPER_007  117
-#define SAA7134_BOARD_BEHOLD_401  	118
-#define SAA7134_BOARD_BEHOLD_403  	119
+#define SAA7134_BOARD_BEHOLD_401	118
+#define SAA7134_BOARD_BEHOLD_403	119
 #define SAA7134_BOARD_BEHOLD_403FM	120
 #define SAA7134_BOARD_BEHOLD_405	121
 #define SAA7134_BOARD_BEHOLD_405FM	122
@@ -547,6 +547,12 @@ struct saa7134_mpeg_ops {
 						  unsigned long status);
 };
 
+enum saa7134_pads {
+	SAA7134_PAD_IF_INPUT,
+	SAA7134_PAD_VID_OUT,
+	SAA7134_NUM_PADS
+};
+
 /* global device status */
 struct saa7134_dev {
 	struct list_head           devlist;
@@ -581,7 +587,7 @@ struct saa7134_dev {
 	/* config info */
 	unsigned int               board;
 	unsigned int               tuner_type;
-	unsigned int 		   radio_type;
+	unsigned int		   radio_type;
 	unsigned char		   tuner_addr;
 	unsigned char		   radio_addr;
 
@@ -592,7 +598,7 @@ struct saa7134_dev {
 	struct i2c_adapter         i2c_adap;
 	struct i2c_client          i2c_client;
 	unsigned char              eedata[256];
-	int 			   has_rds;
+	int			   has_rds;
 
 	/* video overlay */
 	struct v4l2_framebuffer    ovbuf;
@@ -674,7 +680,7 @@ struct saa7134_dev {
 	struct media_pad input_pad[SAA7134_INPUT_MAX + 1];
 
 	struct media_entity demod;
-	struct media_pad demod_pad[DEMOD_NUM_PADS];
+	struct media_pad demod_pad[SAA7134_NUM_PADS];
 
 	struct media_pad video_pad, vbi_pad;
 	struct media_entity *decoder;

@@ -41,6 +41,7 @@
 #include <asm/mipsmtregs.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
+#include <asm/processor.h>
 #include <asm/syscall.h>
 #include <linux/uaccess.h>
 #include <asm/bootinfo.h>
@@ -419,25 +420,38 @@ static int gpr64_set(struct task_struct *target,
 
 #endif /* CONFIG_64BIT */
 
-static int fpr_get(struct task_struct *target,
-		   const struct user_regset *regset,
-		   unsigned int pos, unsigned int count,
-		   void *kbuf, void __user *ubuf)
+/*
+ * Copy the floating-point context to the supplied NT_PRFPREG buffer,
+ * !CONFIG_CPU_HAS_MSA variant.  FP context's general register slots
+ * correspond 1:1 to buffer slots.  Only general registers are copied.
+ */
+static int fpr_get_fpa(struct task_struct *target,
+		       unsigned int *pos, unsigned int *count,
+		       void **kbuf, void __user **ubuf)
 {
-	unsigned i;
-	int err;
+	return user_regset_copyout(pos, count, kbuf, ubuf,
+				   &target->thread.fpu,
+				   0, NUM_FPU_REGS * sizeof(elf_fpreg_t));
+}
+
+/*
+ * Copy the floating-point context to the supplied NT_PRFPREG buffer,
+ * CONFIG_CPU_HAS_MSA variant.  Only lower 64 bits of FP context's
+ * general register slots are copied to buffer slots.  Only general
+ * registers are copied.
+ */
+static int fpr_get_msa(struct task_struct *target,
+		       unsigned int *pos, unsigned int *count,
+		       void **kbuf, void __user **ubuf)
+{
+	unsigned int i;
 	u64 fpr_val;
+	int err;
 
-	/* XXX fcr31  */
-
-	if (sizeof(target->thread.fpu.fpr[i]) == sizeof(elf_fpreg_t))
-		return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
-					   &target->thread.fpu,
-					   0, sizeof(elf_fpregset_t));
-
+	BUILD_BUG_ON(sizeof(fpr_val) != sizeof(elf_fpreg_t));
 	for (i = 0; i < NUM_FPU_REGS; i++) {
 		fpr_val = get_fpr64(&target->thread.fpu.fpr[i], 0);
-		err = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+		err = user_regset_copyout(pos, count, kbuf, ubuf,
 					  &fpr_val, i * sizeof(elf_fpreg_t),
 					  (i + 1) * sizeof(elf_fpreg_t));
 		if (err)
@@ -447,27 +461,71 @@ static int fpr_get(struct task_struct *target,
 	return 0;
 }
 
-static int fpr_set(struct task_struct *target,
+/*
+ * Copy the floating-point context to the supplied NT_PRFPREG buffer.
+ * Choose the appropriate helper for general registers, and then copy
+ * the FCSR and FIR registers separately.
+ */
+static int fpr_get(struct task_struct *target,
 		   const struct user_regset *regset,
 		   unsigned int pos, unsigned int count,
-		   const void *kbuf, const void __user *ubuf)
+		   void *kbuf, void __user *ubuf)
 {
-	unsigned i;
+	const int fcr31_pos = NUM_FPU_REGS * sizeof(elf_fpreg_t);
+	const int fir_pos = fcr31_pos + sizeof(u32);
 	int err;
+
+	if (sizeof(target->thread.fpu.fpr[0]) == sizeof(elf_fpreg_t))
+		err = fpr_get_fpa(target, &pos, &count, &kbuf, &ubuf);
+	else
+		err = fpr_get_msa(target, &pos, &count, &kbuf, &ubuf);
+	if (err)
+		return err;
+
+	err = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				  &target->thread.fpu.fcr31,
+				  fcr31_pos, fcr31_pos + sizeof(u32));
+	if (err)
+		return err;
+
+	err = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+				  &boot_cpu_data.fpu_id,
+				  fir_pos, fir_pos + sizeof(u32));
+
+	return err;
+}
+
+/*
+ * Copy the supplied NT_PRFPREG buffer to the floating-point context,
+ * !CONFIG_CPU_HAS_MSA variant.   Buffer slots correspond 1:1 to FP
+ * context's general register slots.  Only general registers are copied.
+ */
+static int fpr_set_fpa(struct task_struct *target,
+		       unsigned int *pos, unsigned int *count,
+		       const void **kbuf, const void __user **ubuf)
+{
+	return user_regset_copyin(pos, count, kbuf, ubuf,
+				  &target->thread.fpu,
+				  0, NUM_FPU_REGS * sizeof(elf_fpreg_t));
+}
+
+/*
+ * Copy the supplied NT_PRFPREG buffer to the floating-point context,
+ * CONFIG_CPU_HAS_MSA variant.  Buffer slots are copied to lower 64
+ * bits only of FP context's general register slots.  Only general
+ * registers are copied.
+ */
+static int fpr_set_msa(struct task_struct *target,
+		       unsigned int *pos, unsigned int *count,
+		       const void **kbuf, const void __user **ubuf)
+{
+	unsigned int i;
 	u64 fpr_val;
-
-	/* XXX fcr31  */
-
-	init_fp_ctx(target);
-
-	if (sizeof(target->thread.fpu.fpr[i]) == sizeof(elf_fpreg_t))
-		return user_regset_copyin(&pos, &count, &kbuf, &ubuf,
-					  &target->thread.fpu,
-					  0, sizeof(elf_fpregset_t));
+	int err;
 
 	BUILD_BUG_ON(sizeof(fpr_val) != sizeof(elf_fpreg_t));
-	for (i = 0; i < NUM_FPU_REGS && count >= sizeof(elf_fpreg_t); i++) {
-		err = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+	for (i = 0; i < NUM_FPU_REGS && *count > 0; i++) {
+		err = user_regset_copyin(pos, count, kbuf, ubuf,
 					 &fpr_val, i * sizeof(elf_fpreg_t),
 					 (i + 1) * sizeof(elf_fpreg_t));
 		if (err)
@@ -478,9 +536,280 @@ static int fpr_set(struct task_struct *target,
 	return 0;
 }
 
+/*
+ * Copy the supplied NT_PRFPREG buffer to the floating-point context.
+ * Choose the appropriate helper for general registers, and then copy
+ * the FCSR register separately.  Ignore the incoming FIR register
+ * contents though, as the register is read-only.
+ *
+ * We optimize for the case where `count % sizeof(elf_fpreg_t) == 0',
+ * which is supposed to have been guaranteed by the kernel before
+ * calling us, e.g. in `ptrace_regset'.  We enforce that requirement,
+ * so that we can safely avoid preinitializing temporaries for
+ * partial register writes.
+ */
+static int fpr_set(struct task_struct *target,
+		   const struct user_regset *regset,
+		   unsigned int pos, unsigned int count,
+		   const void *kbuf, const void __user *ubuf)
+{
+	const int fcr31_pos = NUM_FPU_REGS * sizeof(elf_fpreg_t);
+	const int fir_pos = fcr31_pos + sizeof(u32);
+	u32 fcr31;
+	int err;
+
+	BUG_ON(count % sizeof(elf_fpreg_t));
+
+	if (pos + count > sizeof(elf_fpregset_t))
+		return -EIO;
+
+	init_fp_ctx(target);
+
+	if (sizeof(target->thread.fpu.fpr[0]) == sizeof(elf_fpreg_t))
+		err = fpr_set_fpa(target, &pos, &count, &kbuf, &ubuf);
+	else
+		err = fpr_set_msa(target, &pos, &count, &kbuf, &ubuf);
+	if (err)
+		return err;
+
+	if (count > 0) {
+		err = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+					 &fcr31,
+					 fcr31_pos, fcr31_pos + sizeof(u32));
+		if (err)
+			return err;
+
+		ptrace_setfcr31(target, fcr31);
+	}
+
+	if (count > 0)
+		err = user_regset_copyin_ignore(&pos, &count, &kbuf, &ubuf,
+						fir_pos,
+						fir_pos + sizeof(u32));
+
+	return err;
+}
+
+#if defined(CONFIG_32BIT) || defined(CONFIG_MIPS32_O32)
+
+/*
+ * Copy the DSP context to the supplied 32-bit NT_MIPS_DSP buffer.
+ */
+static int dsp32_get(struct task_struct *target,
+		     const struct user_regset *regset,
+		     unsigned int pos, unsigned int count,
+		     void *kbuf, void __user *ubuf)
+{
+	unsigned int start, num_regs, i;
+	u32 dspregs[NUM_DSP_REGS + 1];
+
+	BUG_ON(count % sizeof(u32));
+
+	if (!cpu_has_dsp)
+		return -EIO;
+
+	start = pos / sizeof(u32);
+	num_regs = count / sizeof(u32);
+
+	if (start + num_regs > NUM_DSP_REGS + 1)
+		return -EIO;
+
+	for (i = start; i < num_regs; i++)
+		switch (i) {
+		case 0 ... NUM_DSP_REGS - 1:
+			dspregs[i] = target->thread.dsp.dspr[i];
+			break;
+		case NUM_DSP_REGS:
+			dspregs[i] = target->thread.dsp.dspcontrol;
+			break;
+		}
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, dspregs, 0,
+				   sizeof(dspregs));
+}
+
+/*
+ * Copy the supplied 32-bit NT_MIPS_DSP buffer to the DSP context.
+ */
+static int dsp32_set(struct task_struct *target,
+		     const struct user_regset *regset,
+		     unsigned int pos, unsigned int count,
+		     const void *kbuf, const void __user *ubuf)
+{
+	unsigned int start, num_regs, i;
+	u32 dspregs[NUM_DSP_REGS + 1];
+	int err;
+
+	BUG_ON(count % sizeof(u32));
+
+	if (!cpu_has_dsp)
+		return -EIO;
+
+	start = pos / sizeof(u32);
+	num_regs = count / sizeof(u32);
+
+	if (start + num_regs > NUM_DSP_REGS + 1)
+		return -EIO;
+
+	err = user_regset_copyin(&pos, &count, &kbuf, &ubuf, dspregs, 0,
+				 sizeof(dspregs));
+	if (err)
+		return err;
+
+	for (i = start; i < num_regs; i++)
+		switch (i) {
+		case 0 ... NUM_DSP_REGS - 1:
+			target->thread.dsp.dspr[i] = (s32)dspregs[i];
+			break;
+		case NUM_DSP_REGS:
+			target->thread.dsp.dspcontrol = (s32)dspregs[i];
+			break;
+		}
+
+	return 0;
+}
+
+#endif /* CONFIG_32BIT || CONFIG_MIPS32_O32 */
+
+#ifdef CONFIG_64BIT
+
+/*
+ * Copy the DSP context to the supplied 64-bit NT_MIPS_DSP buffer.
+ */
+static int dsp64_get(struct task_struct *target,
+		     const struct user_regset *regset,
+		     unsigned int pos, unsigned int count,
+		     void *kbuf, void __user *ubuf)
+{
+	unsigned int start, num_regs, i;
+	u64 dspregs[NUM_DSP_REGS + 1];
+
+	BUG_ON(count % sizeof(u64));
+
+	if (!cpu_has_dsp)
+		return -EIO;
+
+	start = pos / sizeof(u64);
+	num_regs = count / sizeof(u64);
+
+	if (start + num_regs > NUM_DSP_REGS + 1)
+		return -EIO;
+
+	for (i = start; i < num_regs; i++)
+		switch (i) {
+		case 0 ... NUM_DSP_REGS - 1:
+			dspregs[i] = target->thread.dsp.dspr[i];
+			break;
+		case NUM_DSP_REGS:
+			dspregs[i] = target->thread.dsp.dspcontrol;
+			break;
+		}
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, dspregs, 0,
+				   sizeof(dspregs));
+}
+
+/*
+ * Copy the supplied 64-bit NT_MIPS_DSP buffer to the DSP context.
+ */
+static int dsp64_set(struct task_struct *target,
+		     const struct user_regset *regset,
+		     unsigned int pos, unsigned int count,
+		     const void *kbuf, const void __user *ubuf)
+{
+	unsigned int start, num_regs, i;
+	u64 dspregs[NUM_DSP_REGS + 1];
+	int err;
+
+	BUG_ON(count % sizeof(u64));
+
+	if (!cpu_has_dsp)
+		return -EIO;
+
+	start = pos / sizeof(u64);
+	num_regs = count / sizeof(u64);
+
+	if (start + num_regs > NUM_DSP_REGS + 1)
+		return -EIO;
+
+	err = user_regset_copyin(&pos, &count, &kbuf, &ubuf, dspregs, 0,
+				 sizeof(dspregs));
+	if (err)
+		return err;
+
+	for (i = start; i < num_regs; i++)
+		switch (i) {
+		case 0 ... NUM_DSP_REGS - 1:
+			target->thread.dsp.dspr[i] = dspregs[i];
+			break;
+		case NUM_DSP_REGS:
+			target->thread.dsp.dspcontrol = dspregs[i];
+			break;
+		}
+
+	return 0;
+}
+
+#endif /* CONFIG_64BIT */
+
+/*
+ * Determine whether the DSP context is present.
+ */
+static int dsp_active(struct task_struct *target,
+		      const struct user_regset *regset)
+{
+	return cpu_has_dsp ? NUM_DSP_REGS + 1 : -ENODEV;
+}
+
+/* Copy the FP mode setting to the supplied NT_MIPS_FP_MODE buffer.  */
+static int fp_mode_get(struct task_struct *target,
+		       const struct user_regset *regset,
+		       unsigned int pos, unsigned int count,
+		       void *kbuf, void __user *ubuf)
+{
+	int fp_mode;
+
+	fp_mode = mips_get_process_fp_mode(target);
+	return user_regset_copyout(&pos, &count, &kbuf, &ubuf, &fp_mode, 0,
+				   sizeof(fp_mode));
+}
+
+/*
+ * Copy the supplied NT_MIPS_FP_MODE buffer to the FP mode setting.
+ *
+ * We optimize for the case where `count % sizeof(int) == 0', which
+ * is supposed to have been guaranteed by the kernel before calling
+ * us, e.g. in `ptrace_regset'.  We enforce that requirement, so
+ * that we can safely avoid preinitializing temporaries for partial
+ * mode writes.
+ */
+static int fp_mode_set(struct task_struct *target,
+		       const struct user_regset *regset,
+		       unsigned int pos, unsigned int count,
+		       const void *kbuf, const void __user *ubuf)
+{
+	int fp_mode;
+	int err;
+
+	BUG_ON(count % sizeof(int));
+
+	if (pos + count > sizeof(fp_mode))
+		return -EIO;
+
+	err = user_regset_copyin(&pos, &count, &kbuf, &ubuf, &fp_mode, 0,
+				 sizeof(fp_mode));
+	if (err)
+		return err;
+
+	if (count > 0)
+		err = mips_set_process_fp_mode(target, fp_mode);
+
+	return err;
+}
+
 enum mips_regset {
 	REGSET_GPR,
 	REGSET_FPR,
+	REGSET_DSP,
+	REGSET_FP_MODE,
 };
 
 struct pt_regs_offset {
@@ -586,6 +915,23 @@ static const struct user_regset mips_regsets[] = {
 		.get		= fpr_get,
 		.set		= fpr_set,
 	},
+	[REGSET_DSP] = {
+		.core_note_type	= NT_MIPS_DSP,
+		.n		= NUM_DSP_REGS + 1,
+		.size		= sizeof(u32),
+		.align		= sizeof(u32),
+		.get		= dsp32_get,
+		.set		= dsp32_set,
+		.active		= dsp_active,
+	},
+	[REGSET_FP_MODE] = {
+		.core_note_type	= NT_MIPS_FP_MODE,
+		.n		= 1,
+		.size		= sizeof(int),
+		.align		= sizeof(int),
+		.get		= fp_mode_get,
+		.set		= fp_mode_set,
+	},
 };
 
 static const struct user_regset_view user_mips_view = {
@@ -616,6 +962,23 @@ static const struct user_regset mips64_regsets[] = {
 		.align		= sizeof(elf_fpreg_t),
 		.get		= fpr_get,
 		.set		= fpr_set,
+	},
+	[REGSET_DSP] = {
+		.core_note_type	= NT_MIPS_DSP,
+		.n		= NUM_DSP_REGS + 1,
+		.size		= sizeof(u64),
+		.align		= sizeof(u64),
+		.get		= dsp64_get,
+		.set		= dsp64_set,
+		.active		= dsp_active,
+	},
+	[REGSET_FP_MODE] = {
+		.core_note_type	= NT_MIPS_FP_MODE,
+		.n		= 1,
+		.size		= sizeof(int),
+		.align		= sizeof(int),
+		.get		= fp_mode_get,
+		.set		= fp_mode_set,
 	},
 };
 
@@ -696,18 +1059,18 @@ long arch_ptrace(struct task_struct *child, long request,
 			fregs = get_fpu_regs(child);
 
 #ifdef CONFIG_32BIT
-			if (test_thread_flag(TIF_32BIT_FPREGS)) {
+			if (test_tsk_thread_flag(child, TIF_32BIT_FPREGS)) {
 				/*
 				 * The odd registers are actually the high
 				 * order bits of the values stored in the even
-				 * registers - unless we're using r2k_switch.S.
+				 * registers.
 				 */
 				tmp = get_fpr32(&fregs[(addr & ~1) - FPR_BASE],
 						addr & 1);
 				break;
 			}
 #endif
-			tmp = get_fpr32(&fregs[addr - FPR_BASE], 0);
+			tmp = get_fpr64(&fregs[addr - FPR_BASE], 0);
 			break;
 		case PC:
 			tmp = regs->cp0_epc;
@@ -745,7 +1108,7 @@ long arch_ptrace(struct task_struct *child, long request,
 				goto out;
 			}
 			dregs = __get_dsp_regs(child);
-			tmp = (unsigned long) (dregs[addr - DSP_BASE]);
+			tmp = dregs[addr - DSP_BASE];
 			break;
 		}
 		case DSP_CONTROL:
@@ -791,11 +1154,11 @@ long arch_ptrace(struct task_struct *child, long request,
 
 			init_fp_ctx(child);
 #ifdef CONFIG_32BIT
-			if (test_thread_flag(TIF_32BIT_FPREGS)) {
+			if (test_tsk_thread_flag(child, TIF_32BIT_FPREGS)) {
 				/*
 				 * The odd registers are actually the high
 				 * order bits of the values stored in the even
-				 * registers - unless we're using r2k_switch.S.
+				 * registers.
 				 */
 				set_fpr32(&fregs[(addr & ~1) - FPR_BASE],
 					  addr & 1, data);

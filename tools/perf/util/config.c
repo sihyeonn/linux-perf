@@ -707,6 +707,14 @@ struct perf_config_set *perf_config_set__new(void)
 	return set;
 }
 
+static int perf_config__init(void)
+{
+	if (config_set == NULL)
+		config_set = perf_config_set__new();
+
+	return config_set == NULL;
+}
+
 int perf_config(config_fn_t fn, void *data)
 {
 	int ret = 0;
@@ -714,7 +722,7 @@ int perf_config(config_fn_t fn, void *data)
 	struct perf_config_section *section;
 	struct perf_config_item *item;
 
-	if (config_set == NULL)
+	if (config_set == NULL && perf_config__init())
 		return -1;
 
 	perf_config_set__for_each_entry(config_set, section, item) {
@@ -733,12 +741,6 @@ int perf_config(config_fn_t fn, void *data)
 	}
 
 	return ret;
-}
-
-void perf_config__init(void)
-{
-	if (config_set == NULL)
-		config_set = perf_config_set__new();
 }
 
 void perf_config__exit(void)
@@ -809,14 +811,14 @@ int config_error_nonbool(const char *var)
 void set_buildid_dir(const char *dir)
 {
 	if (dir)
-		scnprintf(buildid_dir, MAXPATHLEN-1, "%s", dir);
+		scnprintf(buildid_dir, MAXPATHLEN, "%s", dir);
 
 	/* default to $HOME/.debug */
 	if (buildid_dir[0] == '\0') {
 		char *home = getenv("HOME");
 
 		if (home) {
-			snprintf(buildid_dir, MAXPATHLEN-1, "%s/%s",
+			snprintf(buildid_dir, MAXPATHLEN, "%s/%s",
 				 home, DEBUG_CACHE_DIR);
 		} else {
 			strncpy(buildid_dir, DEBUG_CACHE_DIR, MAXPATHLEN-1);

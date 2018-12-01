@@ -33,6 +33,7 @@
 #include <linux/quotaops.h>
 #include <linux/uaccess.h>
 #include <linux/dax.h>
+#include <linux/iversion.h>
 #include "ext2.h"
 #include "xattr.h"
 #include "acl.h"
@@ -184,7 +185,7 @@ static struct inode *ext2_alloc_inode(struct super_block *sb)
 	if (!ei)
 		return NULL;
 	ei->i_block_alloc_info = NULL;
-	ei->vfs_inode.i_version = 1;
+	inode_set_iversion(&ei->vfs_inode, 1);
 #ifdef CONFIG_QUOTA
 	memset(&ei->i_dquot, 0, sizeof(ei->i_dquot));
 #endif
@@ -220,11 +221,13 @@ static void init_once(void *foo)
 
 static int __init init_inodecache(void)
 {
-	ext2_inode_cachep = kmem_cache_create("ext2_inode_cache",
-					     sizeof(struct ext2_inode_info),
-					     0, (SLAB_RECLAIM_ACCOUNT|
-						SLAB_MEM_SPREAD|SLAB_ACCOUNT),
-					     init_once);
+	ext2_inode_cachep = kmem_cache_create_usercopy("ext2_inode_cache",
+				sizeof(struct ext2_inode_info), 0,
+				(SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD|
+					SLAB_ACCOUNT),
+				offsetof(struct ext2_inode_info, i_data),
+				sizeof_field(struct ext2_inode_info, i_data),
+				init_once);
 	if (ext2_inode_cachep == NULL)
 		return -ENOMEM;
 	return 0;
@@ -306,20 +309,17 @@ static int ext2_show_options(struct seq_file *seq, struct dentry *root)
 	if (test_opt(sb, NOBH))
 		seq_puts(seq, ",nobh");
 
-#if defined(CONFIG_QUOTA)
 	if (sbi->s_mount_opt & EXT2_MOUNT_USRQUOTA)
 		seq_puts(seq, ",usrquota");
 
 	if (sbi->s_mount_opt & EXT2_MOUNT_GRPQUOTA)
 		seq_puts(seq, ",grpquota");
-#endif
 
-#ifdef CONFIG_FS_DAX
 	if (sbi->s_mount_opt & EXT2_MOUNT_XIP)
 		seq_puts(seq, ",xip");
+
 	if (sbi->s_mount_opt & EXT2_MOUNT_DAX)
 		seq_puts(seq, ",dax");
-#endif
 
 	if (!test_opt(sb, RESERVATION))
 		seq_puts(seq, ",noreservation");
@@ -554,6 +554,9 @@ static int parse_options(char *options, struct super_block *sb,
 			set_opt (opts->s_mount_opt, NO_UID32);
 			break;
 		case Opt_nocheck:
+			ext2_msg(sb, KERN_WARNING,
+				"Option nocheck/check=none is deprecated and"
+				" will be removed in June 2020.");
 			clear_opt (opts->s_mount_opt, CHECK);
 			break;
 		case Opt_debug:
@@ -676,7 +679,8 @@ static int ext2_setup_super (struct super_block * sb,
 			"running e2fsck is recommended");
 	else if (le32_to_cpu(es->s_checkinterval) &&
 		(le32_to_cpu(es->s_lastcheck) +
-			le32_to_cpu(es->s_checkinterval) <= get_seconds()))
+			le32_to_cpu(es->s_checkinterval) <=
+			ktime_get_real_seconds()))
 		ext2_msg(sb, KERN_WARNING,
 			"warning: checktime reached, "
 			"running e2fsck is recommended");
@@ -824,7 +828,7 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 	unsigned long logic_sb_block;
 	unsigned long offset = 0;
 	unsigned long def_mount_opts;
-	long ret = -EINVAL;
+	long ret = -ENOMEM;
 	int blocksize = BLOCK_SIZE;
 	int db_count;
 	int i, j;
@@ -832,7 +836,6 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 	int err;
 	struct ext2_mount_options opts;
 
-	err = -ENOMEM;
 	sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
 	if (!sbi)
 		goto failed;
@@ -848,6 +851,7 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 	sbi->s_daxdev = dax_dev;
 
 	spin_lock_init(&sbi->s_lock);
+	ret = -EINVAL;
 
 	/*
 	 * See what the current blocksize for the device is, and
@@ -958,9 +962,11 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
 	blocksize = BLOCK_SIZE << le32_to_cpu(sbi->s_es->s_log_block_size);
 
 	if (sbi->s_mount_opt & EXT2_MOUNT_DAX) {
-		err = bdev_dax_supported(sb, blocksize);
-		if (err)
-			goto failed_mount;
+		if (!bdev_dax_supported(sb->s_bdev, blocksize)) {
+			ext2_msg(sb, KERN_ERR,
+				"DAX unsupported by block device. Turning off DAX.");
+			sbi->s_mount_opt &= ~EXT2_MOUNT_DAX;
+		}
 	}
 
 	/* If the blocksize doesn't match, re-read the thing.. */
@@ -1077,7 +1083,9 @@ static int ext2_fill_super(struct super_block *sb, void *data, int silent)
  					/ EXT2_BLOCKS_PER_GROUP(sb)) + 1;
 	db_count = (sbi->s_groups_count + EXT2_DESC_PER_BLOCK(sb) - 1) /
 		   EXT2_DESC_PER_BLOCK(sb);
-	sbi->s_group_desc = kmalloc (db_count * sizeof (struct buffer_head *), GFP_KERNEL);
+	sbi->s_group_desc = kmalloc_array (db_count,
+					   sizeof(struct buffer_head *),
+					   GFP_KERNEL);
 	if (sbi->s_group_desc == NULL) {
 		ext2_msg(sb, KERN_ERR, "error: not enough memory");
 		goto failed_mount;
@@ -1225,7 +1233,7 @@ static void ext2_clear_super_error(struct super_block *sb)
 		 * write and hope for the best.
 		 */
 		ext2_msg(sb, KERN_ERR,
-		       "previous I/O error to superblock detected\n");
+		       "previous I/O error to superblock detected");
 		clear_buffer_write_io_error(sbh);
 		set_buffer_uptodate(sbh);
 	}
@@ -1238,7 +1246,7 @@ void ext2_sync_super(struct super_block *sb, struct ext2_super_block *es,
 	spin_lock(&EXT2_SB(sb)->s_lock);
 	es->s_free_blocks_count = cpu_to_le32(ext2_count_free_blocks(sb));
 	es->s_free_inodes_count = cpu_to_le32(ext2_count_free_inodes(sb));
-	es->s_wtime = cpu_to_le32(get_seconds());
+	es->s_wtime = cpu_to_le32(ktime_get_real_seconds());
 	/* unlock before we do IO */
 	spin_unlock(&EXT2_SB(sb)->s_lock);
 	mark_buffer_dirty(EXT2_SB(sb)->s_sbh);
@@ -1328,9 +1336,6 @@ static int ext2_remount (struct super_block * sb, int * flags, char * data)
 	new_opts.s_resgid = sbi->s_resgid;
 	spin_unlock(&sbi->s_lock);
 
-	/*
-	 * Allow the "check" option to be passed as a remount option.
-	 */
 	if (!parse_options(data, sb, &new_opts))
 		return -EINVAL;
 
@@ -1353,7 +1358,7 @@ static int ext2_remount (struct super_block * sb, int * flags, char * data)
 		 * the rdonly flag and then mark the partition as valid again.
 		 */
 		es->s_state = cpu_to_le16(sbi->s_mount_state);
-		es->s_mtime = cpu_to_le32(get_seconds());
+		es->s_mtime = cpu_to_le32(ktime_get_real_seconds());
 		spin_unlock(&sbi->s_lock);
 
 		err = dquot_suspend(sb, -1);
@@ -1569,7 +1574,7 @@ out:
 		return err;
 	if (inode->i_size < off+len-towrite)
 		i_size_write(inode, off+len-towrite);
-	inode->i_version++;
+	inode_inc_iversion(inode);
 	inode->i_mtime = inode->i_ctime = current_time(inode);
 	mark_inode_dirty(inode);
 	return len - towrite;

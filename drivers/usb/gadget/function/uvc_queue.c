@@ -166,7 +166,7 @@ int uvcg_queue_buffer(struct uvc_video_queue *queue, struct v4l2_buffer *buf)
 	unsigned long flags;
 	int ret;
 
-	ret = vb2_qbuf(&queue->queue, buf);
+	ret = vb2_qbuf(&queue->queue, NULL, buf);
 	if (ret < 0)
 		return ret;
 
@@ -193,7 +193,7 @@ int uvcg_dequeue_buffer(struct uvc_video_queue *queue, struct v4l2_buffer *buf,
  * This function implements video queue polling and is intended to be used by
  * the device poll handler.
  */
-unsigned int uvcg_queue_poll(struct uvc_video_queue *queue, struct file *file,
+__poll_t uvcg_queue_poll(struct uvc_video_queue *queue, struct file *file,
 			     poll_table *wait)
 {
 	return vb2_poll(&queue->queue, file, wait);

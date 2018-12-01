@@ -65,7 +65,7 @@ static struct cma_dev_port_group *to_dev_port_group(struct config_item *item)
 
 static bool filter_by_name(struct ib_device *ib_dev, void *cookie)
 {
-	return !strcmp(ib_dev->name, cookie);
+	return !strcmp(dev_name(&ib_dev->dev), cookie);
 }
 
 static int cma_configfs_params_get(struct config_item *item,
@@ -295,7 +295,7 @@ static struct config_group *make_cma_dev(struct config_group *group,
 		goto fail;
 	}
 
-	strncpy(cma_dev_group->name, name, sizeof(cma_dev_group->name));
+	strlcpy(cma_dev_group->name, name, sizeof(cma_dev_group->name));
 
 	config_group_init_type_name(&cma_dev_group->ports_group, "ports",
 				    &cma_ports_group_type);

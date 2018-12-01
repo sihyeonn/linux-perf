@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /******************************************************************************
  * rtl8712_recv.c
  *
  * Copyright(c) 2007 - 2010 Realtek Corporation. All rights reserved.
  * Linux device driver for RTL8192SU
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License as
- * published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc.,
- * 51 Franklin Street, Fifth Floor, Boston, MA 02110, USA
  *
  * Modifications for inclusion into the Linux staging tree are
  * Copyright(c) 2010 Larry Finger. All rights reserved.
@@ -899,6 +887,7 @@ static void process_link_qual(struct _adapter *padapter,
 {
 	u32	last_evm = 0, tmpVal;
 	struct rx_pkt_attrib *pattrib;
+	struct smooth_rssi_data *sqd = &padapter->recvpriv.signal_qual_data;
 
 	if (prframe == NULL || padapter == NULL)
 		return;
@@ -907,27 +896,18 @@ static void process_link_qual(struct _adapter *padapter,
 		/*
 		 * 1. Record the general EVM to the sliding window.
 		 */
-		if (padapter->recvpriv.signal_qual_data.total_num++ >=
-				  PHY_LINKQUALITY_SLID_WIN_MAX) {
-			padapter->recvpriv.signal_qual_data.total_num =
-				  PHY_LINKQUALITY_SLID_WIN_MAX;
-			last_evm = padapter->recvpriv.signal_qual_data.elements
-				  [padapter->recvpriv.signal_qual_data.index];
-			padapter->recvpriv.signal_qual_data.total_val -=
-				  last_evm;
+		if (sqd->total_num++ >= PHY_LINKQUALITY_SLID_WIN_MAX) {
+			sqd->total_num = PHY_LINKQUALITY_SLID_WIN_MAX;
+			last_evm = sqd->elements[sqd->index];
+			sqd->total_val -= last_evm;
 		}
-		padapter->recvpriv.signal_qual_data.total_val +=
-			  pattrib->signal_qual;
-		padapter->recvpriv.signal_qual_data.elements[padapter->
-			  recvpriv.signal_qual_data.index++] =
-			  pattrib->signal_qual;
-		if (padapter->recvpriv.signal_qual_data.index >=
-		    PHY_LINKQUALITY_SLID_WIN_MAX)
-			padapter->recvpriv.signal_qual_data.index = 0;
+		sqd->total_val += pattrib->signal_qual;
+		sqd->elements[sqd->index++] = pattrib->signal_qual;
+		if (sqd->index >= PHY_LINKQUALITY_SLID_WIN_MAX)
+			sqd->index = 0;
 
 		/* <1> Showed on UI for user, in percentage. */
-		tmpVal = padapter->recvpriv.signal_qual_data.total_val /
-			 padapter->recvpriv.signal_qual_data.total_num;
+		tmpVal = sqd->total_val / sqd->total_num;
 		padapter->recvpriv.signal = (u8)tmpVal;
 	}
 }
@@ -936,25 +916,18 @@ static void process_rssi(struct _adapter *padapter, union recv_frame *prframe)
 {
 	u32 last_rssi, tmp_val;
 	struct rx_pkt_attrib *pattrib = &prframe->u.hdr.attrib;
+	struct smooth_rssi_data *ssd = &padapter->recvpriv.signal_strength_data;
 
-	if (padapter->recvpriv.signal_strength_data.total_num++ >=
-	    PHY_RSSI_SLID_WIN_MAX) {
-		padapter->recvpriv.signal_strength_data.total_num =
-			 PHY_RSSI_SLID_WIN_MAX;
-		last_rssi = padapter->recvpriv.signal_strength_data.elements
-			    [padapter->recvpriv.signal_strength_data.index];
-		padapter->recvpriv.signal_strength_data.total_val -= last_rssi;
+	if (ssd->total_num++ >= PHY_RSSI_SLID_WIN_MAX) {
+		ssd->total_num = PHY_RSSI_SLID_WIN_MAX;
+		last_rssi = ssd->elements[ssd->index];
+		ssd->total_val -= last_rssi;
 	}
-	padapter->recvpriv.signal_strength_data.total_val +=
-			pattrib->signal_strength;
-	padapter->recvpriv.signal_strength_data.elements[padapter->recvpriv.
-			signal_strength_data.index++] =
-			pattrib->signal_strength;
-	if (padapter->recvpriv.signal_strength_data.index >=
-	    PHY_RSSI_SLID_WIN_MAX)
-		padapter->recvpriv.signal_strength_data.index = 0;
-	tmp_val = padapter->recvpriv.signal_strength_data.total_val /
-		  padapter->recvpriv.signal_strength_data.total_num;
+	ssd->total_val += pattrib->signal_strength;
+	ssd->elements[ssd->index++] = pattrib->signal_strength;
+	if (ssd->index >= PHY_RSSI_SLID_WIN_MAX)
+		ssd->index = 0;
+	tmp_val = ssd->total_val / ssd->total_num;
 	padapter->recvpriv.rssi = (s8)translate2dbm(padapter, (u8)tmp_val);
 }
 

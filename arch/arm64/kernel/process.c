@@ -35,7 +35,6 @@
 #include <linux/delay.h>
 #include <linux/reboot.h>
 #include <linux/interrupt.h>
-#include <linux/kallsyms.h>
 #include <linux/init.h>
 #include <linux/cpu.h>
 #include <linux/elfcore.h>
@@ -60,7 +59,7 @@
 #include <asm/processor.h>
 #include <asm/stacktrace.h>
 
-#ifdef CONFIG_CC_STACKPROTECTOR
+#ifdef CONFIG_STACKPROTECTOR
 #include <linux/stackprotector.h>
 unsigned long __stack_chk_guard __read_mostly;
 EXPORT_SYMBOL(__stack_chk_guard);
@@ -178,16 +177,16 @@ static void print_pstate(struct pt_regs *regs)
 	if (compat_user_mode(regs)) {
 		printk("pstate: %08llx (%c%c%c%c %c %s %s %c%c%c)\n",
 			pstate,
-			pstate & COMPAT_PSR_N_BIT ? 'N' : 'n',
-			pstate & COMPAT_PSR_Z_BIT ? 'Z' : 'z',
-			pstate & COMPAT_PSR_C_BIT ? 'C' : 'c',
-			pstate & COMPAT_PSR_V_BIT ? 'V' : 'v',
-			pstate & COMPAT_PSR_Q_BIT ? 'Q' : 'q',
-			pstate & COMPAT_PSR_T_BIT ? "T32" : "A32",
-			pstate & COMPAT_PSR_E_BIT ? "BE" : "LE",
-			pstate & COMPAT_PSR_A_BIT ? 'A' : 'a',
-			pstate & COMPAT_PSR_I_BIT ? 'I' : 'i',
-			pstate & COMPAT_PSR_F_BIT ? 'F' : 'f');
+			pstate & PSR_AA32_N_BIT ? 'N' : 'n',
+			pstate & PSR_AA32_Z_BIT ? 'Z' : 'z',
+			pstate & PSR_AA32_C_BIT ? 'C' : 'c',
+			pstate & PSR_AA32_V_BIT ? 'V' : 'v',
+			pstate & PSR_AA32_Q_BIT ? 'Q' : 'q',
+			pstate & PSR_AA32_T_BIT ? "T32" : "A32",
+			pstate & PSR_AA32_E_BIT ? "BE" : "LE",
+			pstate & PSR_AA32_A_BIT ? 'A' : 'a',
+			pstate & PSR_AA32_I_BIT ? 'I' : 'i',
+			pstate & PSR_AA32_F_BIT ? 'F' : 'f');
 	} else {
 		printk("pstate: %08llx (%c%c%c%c %c%c%c%c %cPAN %cUAO)\n",
 			pstate,
@@ -221,8 +220,15 @@ void __show_regs(struct pt_regs *regs)
 
 	show_regs_print_info(KERN_DEFAULT);
 	print_pstate(regs);
-	print_symbol("pc : %s\n", regs->pc);
-	print_symbol("lr : %s\n", lr);
+
+	if (!user_mode(regs)) {
+		printk("pc : %pS\n", (void *)regs->pc);
+		printk("lr : %pS\n", (void *)lr);
+	} else {
+		printk("pc : %016llx\n", regs->pc);
+		printk("lr : %016llx\n", lr);
+	}
+
 	printk("sp : %016llx\n", sp);
 
 	i = top_reg;
@@ -251,7 +257,7 @@ static void tls_thread_flush(void)
 	write_sysreg(0, tpidr_el0);
 
 	if (is_compat_task()) {
-		current->thread.tp_value = 0;
+		current->thread.uw.tp_value = 0;
 
 		/*
 		 * We need to ensure ordering between the shadow state and the
@@ -314,6 +320,15 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 	clear_tsk_thread_flag(p, TIF_SVE);
 	p->thread.sve_state = NULL;
 
+	/*
+	 * In case p was allocated the same task_struct pointer as some
+	 * other recently-exited task, make sure p is disassociated from
+	 * any cpu that may have run that now-exited task recently.
+	 * Otherwise we could erroneously skip reloading the FPSIMD
+	 * registers for p.
+	 */
+	fpsimd_flush_task_state(p);
+
 	if (likely(!(p->flags & PF_KTHREAD))) {
 		*childregs = *current_pt_regs();
 		childregs->regs[0] = 0;
@@ -336,13 +351,17 @@ int copy_thread(unsigned long clone_flags, unsigned long stack_start,
 		 * for the new thread.
 		 */
 		if (clone_flags & CLONE_SETTLS)
-			p->thread.tp_value = childregs->regs[3];
+			p->thread.uw.tp_value = childregs->regs[3];
 	} else {
 		memset(childregs, 0, sizeof(struct pt_regs));
 		childregs->pstate = PSR_MODE_EL1h;
 		if (IS_ENABLED(CONFIG_ARM64_UAO) &&
 		    cpus_have_const_cap(ARM64_HAS_UAO))
 			childregs->pstate |= PSR_UAO_BIT;
+
+		if (arm64_get_ssbd_state() == ARM64_SSBD_FORCE_DISABLE)
+			childregs->pstate |= PSR_SSBS_BIT;
+
 		p->thread.cpu_context.x19 = stack_start;
 		p->thread.cpu_context.x20 = stk_sz;
 	}
@@ -361,16 +380,14 @@ void tls_preserve_current_state(void)
 
 static void tls_thread_switch(struct task_struct *next)
 {
-	unsigned long tpidr, tpidrro;
-
 	tls_preserve_current_state();
 
-	tpidr = *task_user_tls(next);
-	tpidrro = is_compat_thread(task_thread_info(next)) ?
-		  next->thread.tp_value : 0;
+	if (is_compat_thread(task_thread_info(next)))
+		write_sysreg(next->thread.uw.tp_value, tpidrro_el0);
+	else if (!arm64_kernel_unmapped_at_el0())
+		write_sysreg(0, tpidrro_el0);
 
-	write_sysreg(tpidr, tpidr_el0);
-	write_sysreg(tpidrro, tpidrro_el0);
+	write_sysreg(*task_user_tls(next), tpidr_el0);
 }
 
 /* Restore the UAO state depending on next's addr_limit */

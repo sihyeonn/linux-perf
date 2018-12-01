@@ -16,17 +16,23 @@ SYNOPSIS
 
 	**bpftool** **version**
 
-	*OBJECT* := { **map** | **program** }
+	*OBJECT* := { **map** | **program** | **cgroup** | **perf** | **net** }
 
 	*OPTIONS* := { { **-V** | **--version** } | { **-h** | **--help** }
 	| { **-j** | **--json** } [{ **-p** | **--pretty** }] }
 
 	*MAP-COMMANDS* :=
-	{ **show** | **dump** | **update** | **lookup** | **getnext** | **delete**
-	| **pin** | **help** }
+	{ **show** | **list** | **create** | **dump** | **update** | **lookup** | **getnext**
+	| **delete** | **pin** | **event_pipe** | **help** }
 
-	*PROG-COMMANDS* := { **show** | **dump jited** | **dump xlated** | **pin**
-	| **help** }
+	*PROG-COMMANDS* := { **show** | **list** | **dump jited** | **dump xlated** | **pin**
+	| **load** | **attach** | **detach** | **help** }
+
+	*CGROUP-COMMANDS* := { **show** | **list** | **attach** | **detach** | **help** }
+
+	*PERF-COMMANDS* := { **show** | **list** | **help** }
+
+	*NET-COMMANDS* := { **show** | **list** | **help** }
 
 DESCRIPTION
 ===========
@@ -51,6 +57,11 @@ OPTIONS
 	-p, --pretty
 		  Generate human-readable JSON output. Implies **-j**.
 
+	-m, --mapcompat
+		  Allow loading maps with unknown map definitions.
+
+
 SEE ALSO
 ========
-	**bpftool-map**\ (8), **bpftool-prog**\ (8)
+	**bpftool-map**\ (8), **bpftool-prog**\ (8), **bpftool-cgroup**\ (8)
+        **bpftool-perf**\ (8), **bpftool-net**\ (8)

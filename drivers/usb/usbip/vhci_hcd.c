@@ -318,8 +318,9 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 	struct vhci_hcd	*vhci_hcd;
 	struct vhci	*vhci;
 	int             retval = 0;
-	int		rhport;
+	int		rhport = -1;
 	unsigned long	flags;
+	bool invalid_rhport = false;
 
 	u32 prev_port_status[VHCI_HC_PORTS];
 
@@ -334,9 +335,19 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 	usbip_dbg_vhci_rh("typeReq %x wValue %x wIndex %x\n", typeReq, wValue,
 			  wIndex);
 
-	if (wIndex > VHCI_HC_PORTS)
-		pr_err("invalid port number %d\n", wIndex);
-	rhport = wIndex - 1;
+	/*
+	 * wIndex can be 0 for some request types (typeReq). rhport is
+	 * in valid range when wIndex >= 1 and < VHCI_HC_PORTS.
+	 *
+	 * Reference port_status[] only with valid rhport when
+	 * invalid_rhport is false.
+	 */
+	if (wIndex < 1 || wIndex > VHCI_HC_PORTS) {
+		invalid_rhport = true;
+		if (wIndex > VHCI_HC_PORTS)
+			pr_err("invalid port number %d\n", wIndex);
+	} else
+		rhport = wIndex - 1;
 
 	vhci_hcd = hcd_to_vhci_hcd(hcd);
 	vhci = vhci_hcd->vhci;
@@ -345,8 +356,9 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 
 	/* store old status and compare now and old later */
 	if (usbip_dbg_flag_vhci_rh) {
-		memcpy(prev_port_status, vhci_hcd->port_status,
-			sizeof(prev_port_status));
+		if (!invalid_rhport)
+			memcpy(prev_port_status, vhci_hcd->port_status,
+				sizeof(prev_port_status));
 	}
 
 	switch (typeReq) {
@@ -354,6 +366,10 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		usbip_dbg_vhci_rh(" ClearHubFeature\n");
 		break;
 	case ClearPortFeature:
+		if (invalid_rhport) {
+			pr_err("invalid port number %d\n", wIndex);
+			goto error;
+		}
 		switch (wValue) {
 		case USB_PORT_FEAT_SUSPEND:
 			if (hcd->speed == HCD_USB3) {
@@ -413,9 +429,10 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		break;
 	case GetPortStatus:
 		usbip_dbg_vhci_rh(" GetPortStatus port %x\n", wIndex);
-		if (wIndex < 1) {
+		if (invalid_rhport) {
 			pr_err("invalid port number %d\n", wIndex);
 			retval = -EPIPE;
+			goto error;
 		}
 
 		/* we do not care about resume. */
@@ -511,11 +528,20 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 				goto error;
 			}
 
+			if (invalid_rhport) {
+				pr_err("invalid port number %d\n", wIndex);
+				goto error;
+			}
+
 			vhci_hcd->port_status[rhport] |= USB_PORT_STAT_SUSPEND;
 			break;
 		case USB_PORT_FEAT_POWER:
 			usbip_dbg_vhci_rh(
 				" SetPortFeature: USB_PORT_FEAT_POWER\n");
+			if (invalid_rhport) {
+				pr_err("invalid port number %d\n", wIndex);
+				goto error;
+			}
 			if (hcd->speed == HCD_USB3)
 				vhci_hcd->port_status[rhport] |= USB_SS_PORT_STAT_POWER;
 			else
@@ -524,6 +550,10 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		case USB_PORT_FEAT_BH_PORT_RESET:
 			usbip_dbg_vhci_rh(
 				" SetPortFeature: USB_PORT_FEAT_BH_PORT_RESET\n");
+			if (invalid_rhport) {
+				pr_err("invalid port number %d\n", wIndex);
+				goto error;
+			}
 			/* Applicable only for USB3.0 hub */
 			if (hcd->speed != HCD_USB3) {
 				pr_err("USB_PORT_FEAT_BH_PORT_RESET req not "
@@ -534,6 +564,10 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		case USB_PORT_FEAT_RESET:
 			usbip_dbg_vhci_rh(
 				" SetPortFeature: USB_PORT_FEAT_RESET\n");
+			if (invalid_rhport) {
+				pr_err("invalid port number %d\n", wIndex);
+				goto error;
+			}
 			/* if it's already enabled, disable */
 			if (hcd->speed == HCD_USB3) {
 				vhci_hcd->port_status[rhport] = 0;
@@ -554,6 +588,10 @@ static int vhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 		default:
 			usbip_dbg_vhci_rh(" SetPortFeature: default %d\n",
 					  wValue);
+			if (invalid_rhport) {
+				pr_err("invalid port number %d\n", wIndex);
+				goto error;
+			}
 			if (hcd->speed == HCD_USB3) {
 				if ((vhci_hcd->port_status[rhport] &
 				     USB_SS_PORT_STAT_POWER) != 0) {
@@ -595,7 +633,7 @@ error:
 	if (usbip_dbg_flag_vhci_rh) {
 		pr_debug("port %d\n", rhport);
 		/* Only dump valid port status */
-		if (rhport >= 0) {
+		if (!invalid_rhport) {
 			dump_port_status_diff(prev_port_status[rhport],
 					      vhci_hcd->port_status[rhport],
 					      hcd->speed == HCD_USB3);
@@ -605,8 +643,10 @@ error:
 
 	spin_unlock_irqrestore(&vhci->lock, flags);
 
-	if ((vhci_hcd->port_status[rhport] & PORT_C_MASK) != 0)
+	if (!invalid_rhport &&
+	    (vhci_hcd->port_status[rhport] & PORT_C_MASK) != 0) {
 		usb_hcd_poll_rh_status(hcd);
+	}
 
 	return retval;
 }
@@ -655,9 +695,6 @@ static int vhci_urb_enqueue(struct usb_hcd *hcd, struct urb *urb, gfp_t mem_flag
 	int ret = 0;
 	struct vhci_device *vdev;
 	unsigned long flags;
-
-	usbip_dbg_vhci_hc("enter, usb_hcd %p urb %p mem_flags %d\n",
-			  hcd, urb, mem_flags);
 
 	if (portnum > VHCI_HC_PORTS) {
 		pr_err("invalid port number %d\n", portnum);
@@ -822,8 +859,6 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 	struct vhci_device *vdev;
 	unsigned long flags;
 
-	pr_info("dequeue a urb %p\n", urb);
-
 	spin_lock_irqsave(&vhci->lock, flags);
 
 	priv = urb->hcpriv;
@@ -851,7 +886,6 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 		/* tcp connection is closed */
 		spin_lock(&vdev->priv_lock);
 
-		pr_info("device %p seems to be disconnected\n", vdev);
 		list_del(&priv->list);
 		kfree(priv);
 		urb->hcpriv = NULL;
@@ -863,8 +897,6 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 		 * vhci_rx will receive RET_UNLINK and give back the URB.
 		 * Otherwise, we give back it here.
 		 */
-		pr_info("gives back urb %p\n", urb);
-
 		usb_hcd_unlink_urb_from_ep(hcd, urb);
 
 		spin_unlock_irqrestore(&vhci->lock, flags);
@@ -891,8 +923,6 @@ static int vhci_urb_dequeue(struct usb_hcd *hcd, struct urb *urb, int status)
 			pr_info("seqnum max\n");
 
 		unlink->unlink_seqnum = priv->seqnum;
-
-		pr_info("device %p seems to be still connected\n", vdev);
 
 		/* send cmd_unlink and try to cancel the pending URB in the
 		 * peer */
@@ -975,7 +1005,7 @@ static void vhci_shutdown_connection(struct usbip_device *ud)
 
 	/* need this? see stub_dev.c */
 	if (ud->tcp_socket) {
-		pr_debug("shutdown tcp_socket %p\n", ud->tcp_socket);
+		pr_debug("shutdown tcp_socket %d\n", ud->sockfd);
 		kernel_sock_shutdown(ud->tcp_socket, SHUT_RDWR);
 	}
 
@@ -994,6 +1024,7 @@ static void vhci_shutdown_connection(struct usbip_device *ud)
 	if (vdev->ud.tcp_socket) {
 		sockfd_put(vdev->ud.tcp_socket);
 		vdev->ud.tcp_socket = NULL;
+		vdev->ud.sockfd = -1;
 	}
 	pr_info("release socket\n");
 
@@ -1040,6 +1071,7 @@ static void vhci_device_reset(struct usbip_device *ud)
 	if (ud->tcp_socket) {
 		sockfd_put(ud->tcp_socket);
 		ud->tcp_socket = NULL;
+		ud->sockfd = -1;
 	}
 	ud->status = VDEV_ST_NULL;
 
@@ -1098,7 +1130,6 @@ static int hcd_name_to_id(const char *name)
 static int vhci_setup(struct usb_hcd *hcd)
 {
 	struct vhci *vhci = *((void **)dev_get_platdata(hcd->self.controller));
-	hcd->self.sg_tablesize = ~0;
 	if (usb_hcd_is_primary_hcd(hcd)) {
 		vhci->vhci_hcd_hs = hcd_to_vhci_hcd(hcd);
 		vhci->vhci_hcd_hs->vhci = vhci;

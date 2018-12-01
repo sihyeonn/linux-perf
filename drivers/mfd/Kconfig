@@ -99,6 +99,15 @@ config MFD_AAT2870_CORE
 	  additional drivers must be enabled in order to use the
 	  functionality of the device.
 
+config MFD_AT91_USART
+	tristate "AT91 USART Driver"
+	select MFD_CORE
+	help
+	  Select this to get support for AT91 USART IP. This is a wrapper
+	  over at91-usart-serial driver and usart-spi-driver. Only one function
+	  can be used at a time. The choice is done at boot time by the probe
+	  function of this MFD driver according to a device tree property.
+
 config MFD_ATMEL_FLEXCOM
 	tristate "Atmel Flexcom (Flexible Serial Communication Unit)"
 	select MFD_CORE
@@ -202,25 +211,65 @@ config MFD_CROS_EC
 	  You also need to enable the driver for the bus you are using. The
 	  protocol for talking to the EC is defined by the bus driver.
 
-config MFD_CROS_EC_I2C
-	tristate "ChromeOS Embedded Controller (I2C)"
-	depends on MFD_CROS_EC && I2C
+config MFD_CROS_EC_CHARDEV
+        tristate "Chrome OS Embedded Controller userspace device interface"
+        depends on MFD_CROS_EC
+        select CROS_EC_CTL
+        ---help---
+          This driver adds support to talk with the ChromeOS EC from userspace.
 
+          If you have a supported Chromebook, choose Y or M here.
+          The module will be called cros_ec_dev.
+
+config MFD_MADERA
+	tristate "Cirrus Logic Madera codecs"
+	select MFD_CORE
+	select REGMAP
+	select REGMAP_IRQ
+	select MADERA_IRQ
+	select PINCTRL
+	select PINCTRL_MADERA
 	help
-	  If you say Y here, you get support for talking to the ChromeOS
-	  EC through an I2C bus. This uses a simple byte-level protocol with
-	  a checksum. Failing accesses will be retried three times to
-	  improve reliability.
+	  Support for the Cirrus Logic Madera platform audio codecs
 
-config MFD_CROS_EC_SPI
-	tristate "ChromeOS Embedded Controller (SPI)"
-	depends on MFD_CROS_EC && SPI
+config MFD_MADERA_I2C
+	tristate "Cirrus Logic Madera codecs with I2C"
+	depends on MFD_MADERA
+	depends on I2C
+	select REGMAP_I2C
+	help
+	  Support for the Cirrus Logic Madera platform audio SoC
+	  core functionality controlled via I2C.
 
-	---help---
-	  If you say Y here, you get support for talking to the ChromeOS EC
-	  through a SPI bus, using a byte-level protocol. Since the EC's
-	  response time cannot be guaranteed, we support ignoring
-	  'pre-amble' bytes before the response actually starts.
+config MFD_MADERA_SPI
+	tristate "Cirrus Logic Madera codecs with SPI"
+	depends on MFD_MADERA
+	depends on SPI_MASTER
+	select REGMAP_SPI
+	help
+	  Support for the Cirrus Logic Madera platform audio SoC
+	  core functionality controlled via SPI.
+
+config MFD_CS47L35
+	bool "Cirrus Logic CS47L35"
+	select PINCTRL_CS47L35
+	depends on MFD_MADERA
+	help
+	  Support for Cirrus Logic CS47L35 Smart Codec
+
+config MFD_CS47L85
+	bool "Cirrus Logic CS47L85"
+	select PINCTRL_CS47L85
+	depends on MFD_MADERA
+	help
+	  Support for Cirrus Logic CS47L85 Smart Codec
+
+config MFD_CS47L90
+	bool "Cirrus Logic CS47L90/91"
+	select PINCTRL_CS47L90
+	depends on MFD_MADERA
+	help
+	  Support for Cirrus Logic CS47L90 and CS47L91 Smart Codecs
 
 config MFD_ASIC3
 	bool "Compaq ASIC3"
@@ -877,7 +926,7 @@ config UCB1400_CORE
 
 config MFD_PM8XXX
 	tristate "Qualcomm PM8xxx PMIC chips driver"
-	depends on (ARM || HEXAGON)
+	depends on (ARM || HEXAGON || COMPILE_TEST)
 	select IRQ_DOMAIN
 	select MFD_CORE
 	select REGMAP
@@ -929,17 +978,6 @@ config MFD_RDC321X
 	  southbridge which provides access to GPIOs and Watchdog using the
 	  southbridge PCI device configuration space.
 
-config MFD_RTSX_PCI
-	tristate "Realtek PCI-E card reader"
-	depends on PCI
-	select MFD_CORE
-	help
-	  This supports for Realtek PCI-Express card reader including rts5209,
-	  rts5227, rts522A, rts5229, rts5249, rts524A, rts525A, rtl8411, etc.
-	  Realtek card reader supports access to many types of memory cards,
-	  such as Memory Stick, Memory Stick Pro, Secure Digital and
-	  MultiMediaCard.
-
 config MFD_RT5033
 	tristate "Richtek RT5033 Power Management IC"
 	depends on I2C
@@ -952,16 +990,6 @@ config MFD_RT5033
 	  common support for accessing the device. The device supports multiple
 	  sub-devices like charger, fuel gauge, flash LED, current source,
 	  LDO and Buck.
-
-config MFD_RTSX_USB
-	tristate "Realtek USB card reader"
-	depends on USB
-	select MFD_CORE
-	help
-	  Select this option to get support for Realtek USB 2.0 card readers
-	  including RTS5129, RTS5139, RTS5179 and RTS5170.
-	  Realtek card reader supports access to many types of memory cards,
-	  such as Memory Stick Pro, Secure Digital and MultiMediaCard.
 
 config MFD_RC5T583
 	bool "Ricoh RC5T583 Power Management system device"
@@ -1004,16 +1032,23 @@ config MFD_RN5T618
 	  functionality of the device.
 
 config MFD_SEC_CORE
-	bool "SAMSUNG Electronics PMIC Series Support"
+	tristate "SAMSUNG Electronics PMIC Series Support"
 	depends on I2C=y
 	select MFD_CORE
 	select REGMAP_I2C
 	select REGMAP_IRQ
 	help
-	 Support for the Samsung Electronics MFD series.
-	 This driver provides common support for accessing the device,
-	 additional drivers must be enabled in order to use the functionality
-	 of the device
+	  Support for the Samsung Electronics PMIC devices coming
+	  usually along with Samsung Exynos SoC chipset.
+	  This driver provides common support for accessing the device,
+	  additional drivers must be enabled in order to use the functionality
+	  of the device
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called sec-core.
+	  Have in mind that important core drivers (like regulators) depend
+	  on this driver so building this as a module might require proper
+	  initial ramdisk or might not boot up as well in certain scenarios.
 
 config MFD_SI476X_CORE
 	tristate "Silicon Laboratories 4761/64/68 AM/FM radio."
@@ -1798,6 +1833,19 @@ config MFD_STW481X
 	  in various ST Microelectronics and ST-Ericsson embedded
 	  Nomadik series.
 
+config MFD_ROHM_BD718XX
+	tristate "ROHM BD71837 Power Management IC"
+	depends on I2C=y
+	depends on OF
+	select REGMAP_I2C
+	select REGMAP_IRQ
+	select MFD_CORE
+	help
+	  Select this option to get support for the ROHM BD71837
+	  Power Management ICs. BD71837 is designed to power processors like
+	  NXP i.MX8. It contains 8 BUCK outputs and 7 LDOs, voltage monitoring
+	  and emergency shut down as well as 32,768KHz clock output.
+
 config MFD_STM32_LPTIMER
 	tristate "Support for STM32 Low-Power Timer"
 	depends on (ARCH_STM32 && OF) || COMPILE_TEST
@@ -1858,6 +1906,14 @@ config MFD_VEXPRESS_SYSREG
 	help
 	  System Registers are the platform configuration block
 	  on the ARM Ltd. Versatile Express board.
+
+config RAVE_SP_CORE
+	tristate "RAVE SP MCU core driver"
+	depends on SERIAL_DEV_BUS
+	select CRC_CCITT
+	help
+	  Select this to get support for the Supervisory Processor
+	  device found on several devices in RAVE line of hardware.
 
 endmenu
 endif

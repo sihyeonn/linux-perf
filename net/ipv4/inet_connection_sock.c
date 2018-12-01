@@ -27,11 +27,6 @@
 #include <net/sock_reuseport.h>
 #include <net/addrconf.h>
 
-#ifdef INET_CSK_DEBUG
-const char inet_csk_timer_bug_msg[] = "inet_csk BUG: unknown timer value\n";
-EXPORT_SYMBOL(inet_csk_timer_bug_msg);
-#endif
-
 #if IS_ENABLED(CONFIG_IPV6)
 /* match_wildcard == true:  IPV6_ADDR_ANY equals to any IPv6 addresses if IPv6
  *                          only, and any IPv4 addresses if not IPv6 only
@@ -111,6 +106,15 @@ bool inet_rcv_saddr_equal(const struct sock *sk, const struct sock *sk2,
 				    ipv6_only_sock(sk2), match_wildcard);
 }
 EXPORT_SYMBOL(inet_rcv_saddr_equal);
+
+bool inet_rcv_saddr_any(const struct sock *sk)
+{
+#if IS_ENABLED(CONFIG_IPV6)
+	if (sk->sk_family == AF_INET6)
+		return ipv6_addr_any(&sk->sk_v6_rcv_saddr);
+#endif
+	return !sk->sk_rcv_saddr;
+}
 
 void inet_get_local_port_range(struct net *net, int *low, int *high)
 {
@@ -475,7 +479,6 @@ struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern)
 		}
 		spin_unlock_bh(&queue->fastopenq.lock);
 	}
-	mem_cgroup_sk_alloc(newsk);
 out:
 	release_sock(sk);
 	if (req)
@@ -541,7 +544,8 @@ struct dst_entry *inet_csk_route_req(const struct sock *sk,
 	struct ip_options_rcu *opt;
 	struct rtable *rt;
 
-	opt = ireq_opt_deref(ireq);
+	rcu_read_lock();
+	opt = rcu_dereference(ireq->ireq_opt);
 
 	flowi4_init_output(fl4, ireq->ir_iif, ireq->ir_mark,
 			   RT_CONN_FLAGS(sk), RT_SCOPE_UNIVERSE,
@@ -555,11 +559,13 @@ struct dst_entry *inet_csk_route_req(const struct sock *sk,
 		goto no_route;
 	if (opt && opt->opt.is_strictroute && rt->rt_uses_gateway)
 		goto route_err;
+	rcu_read_unlock();
 	return &rt->dst;
 
 route_err:
 	ip_rt_put(rt);
 no_route:
+	rcu_read_unlock();
 	__IP_INC_STATS(net, IPSTATS_MIB_OUTNOROUTES);
 	return NULL;
 }
@@ -685,7 +691,7 @@ static void reqsk_timer_handler(struct timer_list *t)
 	int max_retries, thresh;
 	u8 defer_accept;
 
-	if (sk_state_load(sk_listener) != TCP_LISTEN)
+	if (inet_sk_state_load(sk_listener) != TCP_LISTEN)
 		goto drop;
 
 	max_retries = icsk->icsk_syn_retries ? : net->ipv4.sysctl_tcp_synack_retries;
@@ -783,7 +789,7 @@ struct sock *inet_csk_clone_lock(const struct sock *sk,
 	if (newsk) {
 		struct inet_connection_sock *newicsk = inet_csk(newsk);
 
-		newsk->sk_state = TCP_SYN_RECV;
+		inet_sk_set_state(newsk, TCP_SYN_RECV);
 		newicsk->icsk_bind_hash = NULL;
 
 		inet_sk(newsk)->inet_dport = inet_rsk(req)->ir_rmt_port;
@@ -877,7 +883,7 @@ int inet_csk_listen_start(struct sock *sk, int backlog)
 	 * It is OK, because this socket enters to hash table only
 	 * after validation is complete.
 	 */
-	sk_state_store(sk, TCP_LISTEN);
+	inet_sk_state_store(sk, TCP_LISTEN);
 	if (!sk->sk_prot->get_port(sk, inet->inet_num)) {
 		inet->inet_sport = htons(inet->inet_num);
 
@@ -888,7 +894,7 @@ int inet_csk_listen_start(struct sock *sk, int backlog)
 			return 0;
 	}
 
-	sk->sk_state = TCP_CLOSE;
+	inet_sk_set_state(sk, TCP_CLOSE);
 	return err;
 }
 EXPORT_SYMBOL_GPL(inet_csk_listen_start);

@@ -1082,11 +1082,12 @@ static void ctrl_complete(struct urb *urb)
 	struct usb_ctrlrequest	*reqp;
 	struct subcase		*subcase;
 	int			status = urb->status;
+	unsigned long		flags;
 
 	reqp = (struct usb_ctrlrequest *)urb->setup_packet;
 	subcase = container_of(reqp, struct subcase, setup);
 
-	spin_lock(&ctx->lock);
+	spin_lock_irqsave(&ctx->lock, flags);
 	ctx->count--;
 	ctx->pending--;
 
@@ -1185,7 +1186,7 @@ error:
 	/* signal completion when nothing's queued */
 	if (ctx->pending == 0)
 		complete(&ctx->complete);
-	spin_unlock(&ctx->lock);
+	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
 static int
@@ -1710,6 +1711,35 @@ static int test_halt(struct usbtest_dev *tdev, int ep, struct urb *urb)
 	return 0;
 }
 
+static int test_toggle_sync(struct usbtest_dev *tdev, int ep, struct urb *urb)
+{
+	int	retval;
+
+	/* clear initial data toggle to DATA0 */
+	retval = usb_clear_halt(urb->dev, urb->pipe);
+	if (retval < 0) {
+		ERROR(tdev, "ep %02x couldn't clear halt, %d\n", ep, retval);
+		return retval;
+	}
+
+	/* transfer 3 data packets, should be DATA0, DATA1, DATA0 */
+	retval = simple_io(tdev, urb, 1, 0, 0, __func__);
+	if (retval != 0)
+		return -EINVAL;
+
+	/* clear halt resets device side data toggle, host should react to it */
+	retval = usb_clear_halt(urb->dev, urb->pipe);
+	if (retval < 0) {
+		ERROR(tdev, "ep %02x couldn't clear halt, %d\n", ep, retval);
+		return retval;
+	}
+
+	/* host should use DATA0 again after clear halt */
+	retval = simple_io(tdev, urb, 1, 0, 0, __func__);
+
+	return retval;
+}
+
 static int halt_simple(struct usbtest_dev *dev)
 {
 	int			ep;
@@ -1738,6 +1768,33 @@ static int halt_simple(struct usbtest_dev *dev)
 		retval = test_halt(dev, ep, urb);
 	}
 done:
+	simple_free_urb(urb);
+	return retval;
+}
+
+static int toggle_sync_simple(struct usbtest_dev *dev)
+{
+	int			ep;
+	int			retval = 0;
+	struct urb		*urb;
+	struct usb_device	*udev = testdev_to_usbdev(dev);
+	unsigned		maxp = get_maxpacket(udev, dev->out_pipe);
+
+	/*
+	 * Create a URB that causes a transfer of uneven amount of data packets
+	 * This way the clear toggle has an impact on the data toggle sequence.
+	 * Use 2 maxpacket length packets and one zero packet.
+	 */
+	urb = simple_alloc_urb(udev, 0,  2 * maxp, 0);
+	if (urb == NULL)
+		return -ENOMEM;
+
+	urb->transfer_flags |= URB_ZERO_PACKET;
+
+	ep = usb_pipeendpoint(dev->out_pipe);
+	urb->pipe = dev->out_pipe;
+	retval = test_toggle_sync(dev, ep, urb);
+
 	simple_free_urb(urb);
 	return retval;
 }
@@ -1861,8 +1918,9 @@ struct transfer_context {
 static void complicated_callback(struct urb *urb)
 {
 	struct transfer_context	*ctx = urb->context;
+	unsigned long flags;
 
-	spin_lock(&ctx->lock);
+	spin_lock_irqsave(&ctx->lock, flags);
 	ctx->count--;
 
 	ctx->packet_count += urb->number_of_packets;
@@ -1902,7 +1960,7 @@ static void complicated_callback(struct urb *urb)
 		complete(&ctx->done);
 	}
 done:
-	spin_unlock(&ctx->lock);
+	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
 static struct urb *iso_alloc_urb(
@@ -1972,9 +2030,12 @@ test_queue(struct usbtest_dev *dev, struct usbtest_param_32 *param,
 	unsigned		i;
 	unsigned long		packets = 0;
 	int			status = 0;
-	struct urb		*urbs[param->sglen];
+	struct urb		*urbs[MAX_SGLEN];
 
 	if (!param->sglen || param->iterations > UINT_MAX / param->sglen)
+		return -EINVAL;
+
+	if (param->sglen > MAX_SGLEN)
 		return -EINVAL;
 
 	memset(&context, 0, sizeof(context));
@@ -2523,6 +2584,20 @@ usbtest_do_ioctl(struct usb_interface *intf, struct usbtest_param_32 *param)
 			param->sglen * param->length) / (1024 * 1024));
 		retval = test_queue(dev, param,
 				dev->in_pipe, NULL, 0);
+		break;
+	/* Test data Toggle/seq_nr clear between bulk out transfers */
+	case 29:
+		if (dev->out_pipe == 0)
+			break;
+		retval = 0;
+		dev_info(&intf->dev, "TEST 29: Clear toggle between bulk writes %d times\n",
+				param->iterations);
+		for (i = param->iterations; retval == 0 && i > 0; --i)
+			retval = toggle_sync_simple(dev);
+
+		if (retval)
+			ERROR(dev, "toggle sync failed, iterations left %d\n",
+			      i);
 		break;
 	}
 	return retval;

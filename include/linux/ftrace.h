@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Ftrace header.  For implementation details beyond the random comments
- * scattered below, see: Documentation/trace/ftrace-design.txt
+ * scattered below, see: Documentation/trace/ftrace-design.rst
  */
 
 #ifndef _LINUX_FTRACE_H
@@ -223,7 +223,6 @@ extern enum ftrace_tracing_type_t ftrace_tracing_type;
  */
 int register_ftrace_function(struct ftrace_ops *ops);
 int unregister_ftrace_function(struct ftrace_ops *ops);
-void clear_ftrace_function(void);
 
 extern void ftrace_stub(unsigned long a0, unsigned long a1,
 			struct ftrace_ops *op, struct pt_regs *regs);
@@ -235,11 +234,6 @@ extern void ftrace_stub(unsigned long a0, unsigned long a1,
  */
 #define register_ftrace_function(ops) ({ 0; })
 #define unregister_ftrace_function(ops) ({ 0; })
-static inline int ftrace_nr_registered_ops(void)
-{
-	return 0;
-}
-static inline void clear_ftrace_function(void) { }
 static inline void ftrace_kill(void) { }
 static inline void ftrace_free_init_mem(void) { }
 static inline void ftrace_free_mem(struct module *mod, void *start, void *end) { }
@@ -330,7 +324,7 @@ struct seq_file;
 
 extern int ftrace_text_reserved(const void *start, const void *end);
 
-extern int ftrace_nr_registered_ops(void);
+struct ftrace_ops *ftrace_ops_trampoline(unsigned long addr);
 
 bool is_ftrace_trampoline(unsigned long addr);
 
@@ -707,16 +701,7 @@ static inline unsigned long get_lock_parent_ip(void)
 	return CALLER_ADDR2;
 }
 
-#ifdef CONFIG_IRQSOFF_TRACER
-  extern void time_hardirqs_on(unsigned long a0, unsigned long a1);
-  extern void time_hardirqs_off(unsigned long a0, unsigned long a1);
-#else
-  static inline void time_hardirqs_on(unsigned long a0, unsigned long a1) { }
-  static inline void time_hardirqs_off(unsigned long a0, unsigned long a1) { }
-#endif
-
-#if defined(CONFIG_PREEMPT_TRACER) || \
-	(defined(CONFIG_DEBUG_PREEMPT) && defined(CONFIG_PREEMPTIRQ_EVENTS))
+#ifdef CONFIG_TRACE_PREEMPT_TOGGLE
   extern void trace_preempt_on(unsigned long a0, unsigned long a1);
   extern void trace_preempt_off(unsigned long a0, unsigned long a1);
 #else
@@ -763,9 +748,6 @@ typedef void (*trace_func_graph_ret_t)(struct ftrace_graph_ret *); /* return */
 typedef int (*trace_func_graph_ent_t)(struct ftrace_graph_ent *); /* entry */
 
 #ifdef CONFIG_FUNCTION_GRAPH_TRACER
-
-/* for init task */
-#define INIT_FTRACE_GRAPH		.ret_stack = NULL,
 
 /*
  * Stack of return addresses for functions
@@ -844,7 +826,6 @@ static inline void unpause_graph_tracing(void)
 #else /* !CONFIG_FUNCTION_GRAPH_TRACER */
 
 #define __notrace_funcgraph
-#define INIT_FTRACE_GRAPH
 
 static inline void ftrace_graph_init_task(struct task_struct *t) { }
 static inline void ftrace_graph_exit_task(struct task_struct *t) { }
@@ -923,10 +904,6 @@ extern int tracepoint_printk;
 extern void disable_trace_on_warning(void);
 extern int __disable_trace_on_warning;
 
-#ifdef CONFIG_PREEMPT
-#define INIT_TRACE_RECURSION		.trace_recursion = 0,
-#endif
-
 int tracepoint_printk_sysctl(struct ctl_table *table, int write,
 			     void __user *buffer, size_t *lenp,
 			     loff_t *ppos);
@@ -934,10 +911,6 @@ int tracepoint_printk_sysctl(struct ctl_table *table, int write,
 #else /* CONFIG_TRACING */
 static inline void  disable_trace_on_warning(void) { }
 #endif /* CONFIG_TRACING */
-
-#ifndef INIT_TRACE_RECURSION
-#define INIT_TRACE_RECURSION
-#endif
 
 #ifdef CONFIG_FTRACE_SYSCALLS
 

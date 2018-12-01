@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 #define DISABLE_BRANCH_PROFILING
 #define pr_fmt(fmt) "kasan: " fmt
-#include <linux/bootmem.h>
+
+/* cpu_feature_enabled() cannot be used this early */
+#define USE_EARLY_PGTABLE_L5
+
+#include <linux/memblock.h>
 #include <linux/kasan.h>
 #include <linux/kdebug.h>
-#include <linux/memblock.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
@@ -15,15 +18,20 @@
 #include <asm/tlbflush.h>
 #include <asm/sections.h>
 #include <asm/pgtable.h>
+#include <asm/cpu_entry_area.h>
 
 extern struct range pfn_mapped[E820_MAX_ENTRIES];
 
-static p4d_t tmp_p4d_table[PTRS_PER_P4D] __initdata __aligned(PAGE_SIZE);
+static p4d_t tmp_p4d_table[MAX_PTRS_PER_P4D] __initdata __aligned(PAGE_SIZE);
 
-static __init void *early_alloc(size_t size, int nid)
+static __init void *early_alloc(size_t size, int nid, bool panic)
 {
-	return memblock_virt_alloc_try_nid_nopanic(size, size,
-		__pa(MAX_DMA_ADDRESS), BOOTMEM_ALLOC_ACCESSIBLE, nid);
+	if (panic)
+		return memblock_alloc_try_nid(size, size,
+			__pa(MAX_DMA_ADDRESS), MEMBLOCK_ALLOC_ACCESSIBLE, nid);
+	else
+		return memblock_alloc_try_nid_nopanic(size, size,
+			__pa(MAX_DMA_ADDRESS), MEMBLOCK_ALLOC_ACCESSIBLE, nid);
 }
 
 static void __init kasan_populate_pmd(pmd_t *pmd, unsigned long addr,
@@ -37,14 +45,14 @@ static void __init kasan_populate_pmd(pmd_t *pmd, unsigned long addr,
 		if (boot_cpu_has(X86_FEATURE_PSE) &&
 		    ((end - addr) == PMD_SIZE) &&
 		    IS_ALIGNED(addr, PMD_SIZE)) {
-			p = early_alloc(PMD_SIZE, nid);
+			p = early_alloc(PMD_SIZE, nid, false);
 			if (p && pmd_set_huge(pmd, __pa(p), PAGE_KERNEL))
 				return;
 			else if (p)
 				memblock_free(__pa(p), PMD_SIZE);
 		}
 
-		p = early_alloc(PAGE_SIZE, nid);
+		p = early_alloc(PAGE_SIZE, nid, true);
 		pmd_populate_kernel(&init_mm, pmd, p);
 	}
 
@@ -56,7 +64,7 @@ static void __init kasan_populate_pmd(pmd_t *pmd, unsigned long addr,
 		if (!pte_none(*pte))
 			continue;
 
-		p = early_alloc(PAGE_SIZE, nid);
+		p = early_alloc(PAGE_SIZE, nid, true);
 		entry = pfn_pte(PFN_DOWN(__pa(p)), PAGE_KERNEL);
 		set_pte_at(&init_mm, addr, pte, entry);
 	} while (pte++, addr += PAGE_SIZE, addr != end);
@@ -74,14 +82,14 @@ static void __init kasan_populate_pud(pud_t *pud, unsigned long addr,
 		if (boot_cpu_has(X86_FEATURE_GBPAGES) &&
 		    ((end - addr) == PUD_SIZE) &&
 		    IS_ALIGNED(addr, PUD_SIZE)) {
-			p = early_alloc(PUD_SIZE, nid);
+			p = early_alloc(PUD_SIZE, nid, false);
 			if (p && pud_set_huge(pud, __pa(p), PAGE_KERNEL))
 				return;
 			else if (p)
 				memblock_free(__pa(p), PUD_SIZE);
 		}
 
-		p = early_alloc(PAGE_SIZE, nid);
+		p = early_alloc(PAGE_SIZE, nid, true);
 		pud_populate(&init_mm, pud, p);
 	}
 
@@ -100,7 +108,7 @@ static void __init kasan_populate_p4d(p4d_t *p4d, unsigned long addr,
 	unsigned long next;
 
 	if (p4d_none(*p4d)) {
-		void *p = early_alloc(PAGE_SIZE, nid);
+		void *p = early_alloc(PAGE_SIZE, nid, true);
 
 		p4d_populate(&init_mm, p4d, p);
 	}
@@ -121,7 +129,7 @@ static void __init kasan_populate_pgd(pgd_t *pgd, unsigned long addr,
 	unsigned long next;
 
 	if (pgd_none(*pgd)) {
-		p = early_alloc(PAGE_SIZE, nid);
+		p = early_alloc(PAGE_SIZE, nid, true);
 		pgd_populate(&init_mm, pgd, p);
 	}
 
@@ -171,10 +179,10 @@ static void __init clear_pgds(unsigned long start,
 		 * With folded p4d, pgd_clear() is nop, use p4d_clear()
 		 * instead.
 		 */
-		if (CONFIG_PGTABLE_LEVELS < 5)
-			p4d_clear(p4d_offset(pgd, start));
-		else
+		if (pgtable_l5_enabled())
 			pgd_clear(pgd);
+		else
+			p4d_clear(p4d_offset(pgd, start));
 	}
 
 	pgd = pgd_offset_k(start);
@@ -186,7 +194,7 @@ static inline p4d_t *early_p4d_offset(pgd_t *pgd, unsigned long addr)
 {
 	unsigned long p4d;
 
-	if (!IS_ENABLED(CONFIG_X86_5LEVEL))
+	if (!pgtable_l5_enabled())
 		return (p4d_t *)pgd;
 
 	p4d = __pa_nodebug(pgd_val(*pgd)) & PTE_PFN_MASK;
@@ -258,6 +266,12 @@ void __init kasan_early_init(void)
 	pudval_t pud_val = __pa_nodebug(kasan_zero_pmd) | _KERNPG_TABLE;
 	p4dval_t p4d_val = __pa_nodebug(kasan_zero_pud) | _KERNPG_TABLE;
 
+	/* Mask out unsupported __PAGE_KERNEL bits: */
+	pte_val &= __default_kernel_pte_mask;
+	pmd_val &= __default_kernel_pte_mask;
+	pud_val &= __default_kernel_pte_mask;
+	p4d_val &= __default_kernel_pte_mask;
+
 	for (i = 0; i < PTRS_PER_PTE; i++)
 		kasan_zero_pte[i] = __pte(pte_val);
 
@@ -267,7 +281,7 @@ void __init kasan_early_init(void)
 	for (i = 0; i < PTRS_PER_PUD; i++)
 		kasan_zero_pud[i] = __pud(pud_val);
 
-	for (i = 0; IS_ENABLED(CONFIG_X86_5LEVEL) && i < PTRS_PER_P4D; i++)
+	for (i = 0; pgtable_l5_enabled() && i < PTRS_PER_P4D; i++)
 		kasan_zero_p4d[i] = __p4d(p4d_val);
 
 	kasan_map_early_shadow(early_top_pgt);
@@ -277,6 +291,7 @@ void __init kasan_early_init(void)
 void __init kasan_init(void)
 {
 	int i;
+	void *shadow_cpu_entry_begin, *shadow_cpu_entry_end;
 
 #ifdef CONFIG_KASAN_INLINE
 	register_die_notifier(&kasan_die_notifier);
@@ -297,7 +312,7 @@ void __init kasan_init(void)
 	 * bunch of things like kernel code, modules, EFI mapping, etc.
 	 * We need to take extra steps to not overwrite them.
 	 */
-	if (IS_ENABLED(CONFIG_X86_5LEVEL)) {
+	if (pgtable_l5_enabled()) {
 		void *ptr;
 
 		ptr = (void *)pgd_page_vaddr(*pgd_offset_k(KASAN_SHADOW_END));
@@ -321,16 +336,33 @@ void __init kasan_init(void)
 		map_range(&pfn_mapped[i]);
 	}
 
+	shadow_cpu_entry_begin = (void *)CPU_ENTRY_AREA_BASE;
+	shadow_cpu_entry_begin = kasan_mem_to_shadow(shadow_cpu_entry_begin);
+	shadow_cpu_entry_begin = (void *)round_down((unsigned long)shadow_cpu_entry_begin,
+						PAGE_SIZE);
+
+	shadow_cpu_entry_end = (void *)(CPU_ENTRY_AREA_BASE +
+					CPU_ENTRY_AREA_MAP_SIZE);
+	shadow_cpu_entry_end = kasan_mem_to_shadow(shadow_cpu_entry_end);
+	shadow_cpu_entry_end = (void *)round_up((unsigned long)shadow_cpu_entry_end,
+					PAGE_SIZE);
+
 	kasan_populate_zero_shadow(
 		kasan_mem_to_shadow((void *)PAGE_OFFSET + MAXMEM),
-		kasan_mem_to_shadow((void *)__START_KERNEL_map));
+		shadow_cpu_entry_begin);
+
+	kasan_populate_shadow((unsigned long)shadow_cpu_entry_begin,
+			      (unsigned long)shadow_cpu_entry_end, 0);
+
+	kasan_populate_zero_shadow(shadow_cpu_entry_end,
+				kasan_mem_to_shadow((void *)__START_KERNEL_map));
 
 	kasan_populate_shadow((unsigned long)kasan_mem_to_shadow(_stext),
 			      (unsigned long)kasan_mem_to_shadow(_end),
 			      early_pfn_to_nid(__pa(_stext)));
 
 	kasan_populate_zero_shadow(kasan_mem_to_shadow((void *)MODULES_END),
-			(void *)KASAN_SHADOW_END);
+				(void *)KASAN_SHADOW_END);
 
 	load_cr3(init_top_pgt);
 	__flush_tlb_all();
@@ -342,7 +374,13 @@ void __init kasan_init(void)
 	 */
 	memset(kasan_zero_page, 0, PAGE_SIZE);
 	for (i = 0; i < PTRS_PER_PTE; i++) {
-		pte_t pte = __pte(__pa(kasan_zero_page) | __PAGE_KERNEL_RO | _PAGE_ENC);
+		pte_t pte;
+		pgprot_t prot;
+
+		prot = __pgprot(__PAGE_KERNEL_RO | _PAGE_ENC);
+		pgprot_val(prot) &= __default_kernel_pte_mask;
+
+		pte = __pte(__pa(kasan_zero_page) | pgprot_val(prot));
 		set_pte(&kasan_zero_pte[i], pte);
 	}
 	/* Flush TLBs again to be sure that write protection applied. */

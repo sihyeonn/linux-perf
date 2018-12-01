@@ -3783,7 +3783,7 @@ static int skge_device_event(struct notifier_block *unused,
 		break;
 
 	case NETDEV_UP:
-		d = debugfs_create_file(dev->name, S_IRUGO,
+		d = debugfs_create_file(dev->name, 0444,
 					skge_debug, dev,
 					&skge_debug_fops);
 		if (!d || IS_ERR(d))
@@ -4081,7 +4081,6 @@ static void skge_remove(struct pci_dev *pdev)
 	if (hw->ports > 1) {
 		skge_write32(hw, B0_IMSK, 0);
 		skge_read32(hw, B0_IMSK);
-		free_irq(pdev->irq, hw);
 	}
 	spin_unlock_irq(&hw->hw_lock);
 

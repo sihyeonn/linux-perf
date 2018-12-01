@@ -86,7 +86,7 @@ static int dsa_cpu_dsa_setups(struct dsa_switch *ds)
 		if (!(dsa_is_cpu_port(ds, port) || dsa_is_dsa_port(ds, port)))
 			continue;
 
-		ret = dsa_port_fixed_link_register_of(&ds->ports[port]);
+		ret = dsa_port_link_register_of(&ds->ports[port]);
 		if (ret)
 			return ret;
 	}
@@ -194,7 +194,7 @@ static int dsa_switch_setup_one(struct dsa_switch *ds,
 		ds->ports[i].dn = cd->port_dn[i];
 		ds->ports[i].cpu_dp = dst->cpu_dp;
 
-		if (dsa_is_user_port(ds, i))
+		if (!dsa_is_user_port(ds, i))
 			continue;
 
 		ret = dsa_slave_create(&ds->ports[i]);
@@ -275,7 +275,7 @@ static void dsa_switch_destroy(struct dsa_switch *ds)
 	for (port = 0; port < ds->num_ports; port++) {
 		if (!(dsa_is_cpu_port(ds, port) || dsa_is_dsa_port(ds, port)))
 			continue;
-		dsa_port_fixed_link_unregister_of(&ds->ports[port]);
+		dsa_port_link_unregister_of(&ds->ports[port]);
 	}
 
 	if (ds->slave_mii_bus && ds->ops->phy_read)
@@ -392,8 +392,7 @@ static void dsa_of_free_platform_data(struct dsa_platform_data *pd)
 		}
 
 		/* Drop our reference to the MDIO bus device */
-		if (pd->chip[i].host_dev)
-			put_device(pd->chip[i].host_dev);
+		put_device(pd->chip[i].host_dev);
 	}
 	kfree(pd->chip);
 }
@@ -687,8 +686,7 @@ static void dsa_shutdown(struct platform_device *pdev)
 #ifdef CONFIG_PM_SLEEP
 static int dsa_suspend(struct device *d)
 {
-	struct platform_device *pdev = to_platform_device(d);
-	struct dsa_switch_tree *dst = platform_get_drvdata(pdev);
+	struct dsa_switch_tree *dst = dev_get_drvdata(d);
 	int i, ret = 0;
 
 	for (i = 0; i < dst->pd->nr_chips; i++) {
@@ -703,8 +701,7 @@ static int dsa_suspend(struct device *d)
 
 static int dsa_resume(struct device *d)
 {
-	struct platform_device *pdev = to_platform_device(d);
-	struct dsa_switch_tree *dst = platform_get_drvdata(pdev);
+	struct dsa_switch_tree *dst = dev_get_drvdata(d);
 	int i, ret = 0;
 
 	for (i = 0; i < dst->pd->nr_chips; i++) {
@@ -717,26 +714,6 @@ static int dsa_resume(struct device *d)
 	return ret;
 }
 #endif
-
-/* legacy way, bypassing the bridge *****************************************/
-int dsa_legacy_fdb_add(struct ndmsg *ndm, struct nlattr *tb[],
-		       struct net_device *dev,
-		       const unsigned char *addr, u16 vid,
-		       u16 flags)
-{
-	struct dsa_port *dp = dsa_slave_to_port(dev);
-
-	return dsa_port_fdb_add(dp, addr, vid);
-}
-
-int dsa_legacy_fdb_del(struct ndmsg *ndm, struct nlattr *tb[],
-		       struct net_device *dev,
-		       const unsigned char *addr, u16 vid)
-{
-	struct dsa_port *dp = dsa_slave_to_port(dev);
-
-	return dsa_port_fdb_del(dp, addr, vid);
-}
 
 static SIMPLE_DEV_PM_OPS(dsa_pm_ops, dsa_suspend, dsa_resume);
 

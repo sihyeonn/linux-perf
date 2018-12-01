@@ -26,9 +26,6 @@
  *
  * Also, for certain devices, the interrupt endpoint is used to convey
  * status of a command.
- *
- * Please see http://www.one-eyed-alien.net/~mdharm/linux-usb for more
- * information about this driver.
  */
 
 #include <linux/module.h>
@@ -375,6 +372,15 @@ static int queuecommand_lck(struct scsi_cmnd *srb,
 	if (test_bit(US_FLIDX_DISCONNECTING, &us->dflags)) {
 		usb_stor_dbg(us, "Fail command during disconnect\n");
 		srb->result = DID_NO_CONNECT << 16;
+		done(srb);
+		return 0;
+	}
+
+	if ((us->fflags & US_FL_NO_ATA_1X) &&
+			(srb->cmnd[0] == ATA_12 || srb->cmnd[0] == ATA_16)) {
+		memcpy(srb->sense_buffer, usb_stor_sense_invalidCDB,
+		       sizeof(usb_stor_sense_invalidCDB));
+		srb->result = SAM_STAT_CHECK_CONDITION;
 		done(srb);
 		return 0;
 	}

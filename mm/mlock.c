@@ -64,6 +64,12 @@ void clear_page_mlock(struct page *page)
 	mod_zone_page_state(page_zone(page), NR_MLOCK,
 			    -hpage_nr_pages(page));
 	count_vm_event(UNEVICTABLE_PGCLEARED);
+	/*
+	 * The previous TestClearPageMlocked() corresponds to the smp_mb()
+	 * in __pagevec_lru_add_fn().
+	 *
+	 * See __pagevec_lru_add_fn for more explanation.
+	 */
 	if (!isolate_lru_page(page)) {
 		putback_lru_page(page);
 	} else {
@@ -157,7 +163,7 @@ static void __munlock_isolation_failed(struct page *page)
 
 /**
  * munlock_vma_page - munlock a vma page
- * @page - page to be unlocked, either a normal page or THP page head
+ * @page: page to be unlocked, either a normal page or THP page head
  *
  * returns the size of the page as a page mask (0 for normal page,
  *         HPAGE_PMD_NR - 1 for THP head page)
@@ -521,7 +527,8 @@ static int mlock_fixup(struct vm_area_struct *vma, struct vm_area_struct **prev,
 	vm_flags_t old_flags = vma->vm_flags;
 
 	if (newflags == vma->vm_flags || (vma->vm_flags & VM_SPECIAL) ||
-	    is_vm_hugetlb_page(vma) || vma == get_gate_vma(current->mm))
+	    is_vm_hugetlb_page(vma) || vma == get_gate_vma(current->mm) ||
+	    vma_is_dax(vma))
 		/* don't set VM_LOCKED or VM_LOCKONFAULT and don't count */
 		goto out;
 
@@ -779,7 +786,7 @@ static int apply_mlockall_flags(int flags)
 
 		/* Ignore errors */
 		mlock_fixup(vma, &prev, vma->vm_start, vma->vm_end, newflags);
-		cond_resched_rcu_qs();
+		cond_resched();
 	}
 out:
 	return 0;

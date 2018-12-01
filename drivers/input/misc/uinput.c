@@ -84,11 +84,14 @@ static int uinput_dev_event(struct input_dev *dev,
 			    unsigned int type, unsigned int code, int value)
 {
 	struct uinput_device	*udev = input_get_drvdata(dev);
+	struct timespec64	ts;
 
 	udev->buff[udev->head].type = type;
 	udev->buff[udev->head].code = code;
 	udev->buff[udev->head].value = value;
-	do_gettimeofday(&udev->buff[udev->head].time);
+	ktime_get_ts64(&ts);
+	udev->buff[udev->head].input_event_sec = ts.tv_sec;
+	udev->buff[udev->head].input_event_usec = ts.tv_nsec / NSEC_PER_USEC;
 	udev->head = (udev->head + 1) % UINPUT_BUFFER_SIZE;
 
 	wake_up_interruptible(&udev->waitq);
@@ -407,7 +410,7 @@ static int uinput_validate_absinfo(struct input_dev *dev, unsigned int code,
 	min = abs->minimum;
 	max = abs->maximum;
 
-	if ((min != 0 || max != 0) && max <= min) {
+	if ((min != 0 || max != 0) && max < min) {
 		printk(KERN_DEBUG
 		       "%s: invalid abs[%02x] min:%d max:%d\n",
 		       UINPUT_NAME, code, min, max);
@@ -595,6 +598,7 @@ static ssize_t uinput_inject_events(struct uinput_device *udev,
 
 		input_event(udev->dev, ev.type, ev.code, ev.value);
 		bytes += input_event_size();
+		cond_resched();
 	}
 
 	return bytes;
@@ -694,14 +698,14 @@ static ssize_t uinput_read(struct file *file, char __user *buffer,
 	return retval;
 }
 
-static unsigned int uinput_poll(struct file *file, poll_table *wait)
+static __poll_t uinput_poll(struct file *file, poll_table *wait)
 {
 	struct uinput_device *udev = file->private_data;
 
 	poll_wait(file, &udev->waitq, wait);
 
 	if (udev->head != udev->tail)
-		return POLLIN | POLLRDNORM;
+		return EPOLLIN | EPOLLRDNORM;
 
 	return 0;
 }
@@ -1085,4 +1089,3 @@ MODULE_ALIAS("devname:" UINPUT_NAME);
 MODULE_AUTHOR("Aristeu Sergio Rozanski Filho");
 MODULE_DESCRIPTION("User level driver support for input subsystem");
 MODULE_LICENSE("GPL");
-MODULE_VERSION("0.3");

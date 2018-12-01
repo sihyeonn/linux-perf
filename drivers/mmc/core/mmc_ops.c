@@ -417,7 +417,7 @@ static int mmc_switch_status_error(struct mmc_host *host, u32 status)
 		if (status & R1_SPI_ILLEGAL_COMMAND)
 			return -EBADMSG;
 	} else {
-		if (status & 0xFDFFA000)
+		if (R1_STATUS(status))
 			pr_warn("%s: unexpected status %#x after switch\n",
 				mmc_hostname(host), status);
 		if (status & R1_SWITCH_ERROR)
@@ -848,7 +848,6 @@ int mmc_interrupt_hpi(struct mmc_card *card)
 		return 1;
 	}
 
-	mmc_claim_host(card->host);
 	err = mmc_send_status(card, &status);
 	if (err) {
 		pr_err("%s: Get card status fail\n", mmc_hostname(card->host));
@@ -890,7 +889,6 @@ int mmc_interrupt_hpi(struct mmc_card *card)
 	} while (!err);
 
 out:
-	mmc_release_host(card->host);
 	return err;
 }
 
@@ -932,9 +930,7 @@ static int mmc_read_bkops_status(struct mmc_card *card)
 	int err;
 	u8 *ext_csd;
 
-	mmc_claim_host(card->host);
 	err = mmc_get_ext_csd(card, &ext_csd);
-	mmc_release_host(card->host);
 	if (err)
 		return err;
 

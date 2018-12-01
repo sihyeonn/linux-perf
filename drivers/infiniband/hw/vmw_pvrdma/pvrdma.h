@@ -93,8 +93,8 @@ struct pvrdma_cq {
 	struct pvrdma_page_dir pdir;
 	u32 cq_handle;
 	bool is_kernel;
-	atomic_t refcnt;
-	wait_queue_head_t wait;
+	refcount_t refcnt;
+	struct completion free;
 };
 
 struct pvrdma_id_table {
@@ -175,7 +175,7 @@ struct pvrdma_srq {
 	u32 srq_handle;
 	int npages;
 	refcount_t refcnt;
-	wait_queue_head_t wait;
+	struct completion free;
 };
 
 struct pvrdma_qp {
@@ -196,8 +196,8 @@ struct pvrdma_qp {
 	u8 state;
 	bool is_kernel;
 	struct mutex mutex; /* QP state mutex. */
-	atomic_t refcnt;
-	wait_queue_head_t wait;
+	refcount_t refcnt;
+	struct completion free;
 };
 
 struct pvrdma_dev {
@@ -376,11 +376,6 @@ static inline enum ib_port_speed pvrdma_port_speed_to_ib(
 					enum pvrdma_port_speed speed)
 {
 	return (enum ib_port_speed)speed;
-}
-
-static inline int pvrdma_qp_attr_mask_to_ib(int attr_mask)
-{
-	return attr_mask;
 }
 
 static inline int ib_qp_attr_mask_to_pvrdma(int attr_mask)

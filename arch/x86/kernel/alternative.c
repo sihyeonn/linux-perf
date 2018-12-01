@@ -46,17 +46,6 @@ static int __init setup_noreplace_smp(char *str)
 }
 __setup("noreplace-smp", setup_noreplace_smp);
 
-#ifdef CONFIG_PARAVIRT
-static int __initdata_or_module noreplace_paravirt = 0;
-
-static int __init setup_noreplace_paravirt(char *str)
-{
-	noreplace_paravirt = 1;
-	return 1;
-}
-__setup("noreplace-paravirt", setup_noreplace_paravirt);
-#endif
-
 #define DPRINTK(fmt, args...)						\
 do {									\
 	if (debug_alternative)						\
@@ -233,6 +222,10 @@ void __init arch_init_ideal_nops(void)
 		}
 		break;
 
+	case X86_VENDOR_HYGON:
+		ideal_nops = p6_nops;
+		return;
+
 	case X86_VENDOR_AMD:
 		if (boot_cpu_data.x86 > 0xf) {
 			ideal_nops = p6_nops;
@@ -298,7 +291,7 @@ recompute_jump(struct alt_instr *a, u8 *orig_insn, u8 *repl_insn, u8 *insnbuf)
 	tgt_rip  = next_rip + o_dspl;
 	n_dspl = tgt_rip - orig_insn;
 
-	DPRINTK("target RIP: %p, new_displ: 0x%x", tgt_rip, n_dspl);
+	DPRINTK("target RIP: %px, new_displ: 0x%x", tgt_rip, n_dspl);
 
 	if (tgt_rip - orig_insn >= 0) {
 		if (n_dspl - 2 <= 127)
@@ -344,15 +337,18 @@ done:
 static void __init_or_module noinline optimize_nops(struct alt_instr *a, u8 *instr)
 {
 	unsigned long flags;
+	int i;
 
-	if (instr[0] != 0x90)
-		return;
+	for (i = 0; i < a->padlen; i++) {
+		if (instr[i] != 0x90)
+			return;
+	}
 
 	local_irq_save(flags);
 	add_nops(instr + (a->instrlen - a->padlen), a->padlen);
 	local_irq_restore(flags);
 
-	DUMP_BYTES(instr, a->instrlen, "%p: [%d:%d) optimized NOPs: ",
+	DUMP_BYTES(instr, a->instrlen, "%px: [%d:%d) optimized NOPs: ",
 		   instr, a->instrlen - a->padlen, a->padlen);
 }
 
@@ -373,7 +369,7 @@ void __init_or_module noinline apply_alternatives(struct alt_instr *start,
 	u8 *instr, *replacement;
 	u8 insnbuf[MAX_PATCH_LEN];
 
-	DPRINTK("alt table %p -> %p", start, end);
+	DPRINTK("alt table %px, -> %px", start, end);
 	/*
 	 * The scan order should be from start to end. A later scanned
 	 * alternative code can overwrite previously scanned alternative code.
@@ -397,14 +393,14 @@ void __init_or_module noinline apply_alternatives(struct alt_instr *start,
 			continue;
 		}
 
-		DPRINTK("feat: %d*32+%d, old: (%p, len: %d), repl: (%p, len: %d), pad: %d",
+		DPRINTK("feat: %d*32+%d, old: (%px len: %d), repl: (%px, len: %d), pad: %d",
 			a->cpuid >> 5,
 			a->cpuid & 0x1f,
 			instr, a->instrlen,
 			replacement, a->replacementlen, a->padlen);
 
-		DUMP_BYTES(instr, a->instrlen, "%p: old_insn: ", instr);
-		DUMP_BYTES(replacement, a->replacementlen, "%p: rpl_insn: ", replacement);
+		DUMP_BYTES(instr, a->instrlen, "%px: old_insn: ", instr);
+		DUMP_BYTES(replacement, a->replacementlen, "%px: rpl_insn: ", replacement);
 
 		memcpy(insnbuf, replacement, a->replacementlen);
 		insnbuf_sz = a->replacementlen;
@@ -430,7 +426,7 @@ void __init_or_module noinline apply_alternatives(struct alt_instr *start,
 				 a->instrlen - a->replacementlen);
 			insnbuf_sz += a->instrlen - a->replacementlen;
 		}
-		DUMP_BYTES(insnbuf, insnbuf_sz, "%p: final_insn: ", instr);
+		DUMP_BYTES(insnbuf, insnbuf_sz, "%px: final_insn: ", instr);
 
 		text_poke_early(instr, insnbuf, insnbuf_sz);
 	}
@@ -596,16 +592,13 @@ void __init_or_module apply_paravirt(struct paravirt_patch_site *start,
 	struct paravirt_patch_site *p;
 	char insnbuf[MAX_PATCH_LEN];
 
-	if (noreplace_paravirt)
-		return;
-
 	for (p = start; p < end; p++) {
 		unsigned int used;
 
 		BUG_ON(p->len > MAX_PATCH_LEN);
 		/* prep the buffer with the original instructions */
 		memcpy(insnbuf, p->instr, p->len);
-		used = pv_init_ops.patch(p->instrtype, p->clobbers, insnbuf,
+		used = pv_ops.init.patch(p->instrtype, insnbuf,
 					 (unsigned long)p->instr, p->len);
 
 		BUG_ON(used > p->len);
@@ -679,6 +672,7 @@ void *__init_or_module text_poke_early(void *addr, const void *opcode,
 	local_irq_save(flags);
 	memcpy(addr, opcode, len);
 	local_irq_restore(flags);
+	sync_core();
 	/* Could also do a CLFLUSH here to speed up CPU recovery; but
 	   that causes hangs on some VIA CPUs. */
 	return addr;
@@ -694,8 +688,6 @@ void *__init_or_module text_poke_early(void *addr, const void *opcode,
  * It means the size must be writable atomically and the address must be aligned
  * in a way that permits an atomic write. It also makes sure we fit on a single
  * page.
- *
- * Note: Must be called under text_mutex.
  */
 void *text_poke(void *addr, const void *opcode, size_t len)
 {
@@ -703,6 +695,14 @@ void *text_poke(void *addr, const void *opcode, size_t len)
 	char *vaddr;
 	struct page *pages[2];
 	int i;
+
+	/*
+	 * While boot memory allocator is runnig we cannot use struct
+	 * pages as they are not yet initialized.
+	 */
+	BUG_ON(!after_bootmem);
+
+	lockdep_assert_held(&text_mutex);
 
 	if (!core_kernel_text((unsigned long)addr)) {
 		pages[0] = vmalloc_to_page(addr);
@@ -786,8 +786,6 @@ int poke_int3_handler(struct pt_regs *regs)
  *	- replace the first byte (int3) by the first byte of
  *	  replacing opcode
  *	- sync cores
- *
- * Note: must be called under text_mutex.
  */
 void *text_poke_bp(void *addr, const void *opcode, size_t len, void *handler)
 {
@@ -796,6 +794,9 @@ void *text_poke_bp(void *addr, const void *opcode, size_t len, void *handler)
 	bp_int3_handler = handler;
 	bp_int3_addr = (u8 *)addr + sizeof(int3);
 	bp_patching_in_progress = true;
+
+	lockdep_assert_held(&text_mutex);
+
 	/*
 	 * Corresponding read barrier in int3 notifier for making sure the
 	 * in_progress and handler are correctly ordered wrt. patching.

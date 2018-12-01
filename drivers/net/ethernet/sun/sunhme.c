@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* sunhme.c: Sparc HME/BigMac 10/100baseT half/full duplex auto switching,
  *           auto carrier detecting ethernet driver.  Also known as the
  *           "Happy Meal Ethernet" found on SunSwift SBUS cards.
@@ -2998,7 +2999,7 @@ static int happy_meal_pci_probe(struct pci_dev *pdev,
 	/* Now make sure pci_dev cookie is there. */
 #ifdef CONFIG_SPARC
 	dp = pci_device_to_OF_node(pdev);
-	strcpy(prom_name, dp->name);
+	snprintf(prom_name, sizeof(prom_name), "%pOFn", dp);
 #else
 	if (is_quattro_p(pdev))
 		strcpy(prom_name, "SUNW,qfe");

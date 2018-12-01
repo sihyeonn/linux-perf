@@ -27,6 +27,7 @@
 #include <linux/prime_numbers.h>
 
 #include "mock_drm.h"
+#include "i915_random.h"
 
 static const unsigned int page_sizes[] = {
 	I915_GTT_PAGE_SIZE_2M,
@@ -177,8 +178,8 @@ huge_pages_object(struct drm_i915_private *i915,
 	drm_gem_private_object_init(&i915->drm, &obj->base, size);
 	i915_gem_object_init(obj, &huge_page_ops);
 
-	obj->base.write_domain = I915_GEM_DOMAIN_CPU;
-	obj->base.read_domains = I915_GEM_DOMAIN_CPU;
+	obj->write_domain = I915_GEM_DOMAIN_CPU;
+	obj->read_domains = I915_GEM_DOMAIN_CPU;
 	obj->cache_level = I915_CACHE_NONE;
 
 	obj->mm.page_mask = page_mask;
@@ -233,6 +234,8 @@ static int fake_get_huge_pages(struct drm_i915_gem_object *obj)
 
 		sg = sg_next(sg);
 	} while (1);
+
+	i915_sg_trim(st);
 
 	obj->mm.madv = I915_MADV_DONTNEED;
 
@@ -328,8 +331,8 @@ fake_huge_pages_object(struct drm_i915_private *i915, u64 size, bool single)
 	else
 		i915_gem_object_init(obj, &fake_ops);
 
-	obj->base.write_domain = I915_GEM_DOMAIN_CPU;
-	obj->base.read_domains = I915_GEM_DOMAIN_CPU;
+	obj->write_domain = I915_GEM_DOMAIN_CPU;
+	obj->read_domains = I915_GEM_DOMAIN_CPU;
 	obj->cache_level = I915_CACHE_NONE;
 
 	return obj;
@@ -337,7 +340,7 @@ fake_huge_pages_object(struct drm_i915_private *i915, u64 size, bool single)
 
 static int igt_check_page_sizes(struct i915_vma *vma)
 {
-	struct drm_i915_private *i915 = to_i915(vma->obj->base.dev);
+	struct drm_i915_private *i915 = vma->vm->i915;
 	unsigned int supported = INTEL_INFO(i915)->page_sizes;
 	struct drm_i915_gem_object *obj = vma->obj;
 	int err = 0;
@@ -378,7 +381,7 @@ static int igt_check_page_sizes(struct i915_vma *vma)
 static int igt_mock_exhaust_device_supported_pages(void *arg)
 {
 	struct i915_hw_ppgtt *ppgtt = arg;
-	struct drm_i915_private *i915 = ppgtt->base.i915;
+	struct drm_i915_private *i915 = ppgtt->vm.i915;
 	unsigned int saved_mask = INTEL_INFO(i915)->page_sizes;
 	struct drm_i915_gem_object *obj;
 	struct i915_vma *vma;
@@ -414,7 +417,7 @@ static int igt_mock_exhaust_device_supported_pages(void *arg)
 				goto out_put;
 			}
 
-			vma = i915_vma_instance(obj, &ppgtt->base, NULL);
+			vma = i915_vma_instance(obj, &ppgtt->vm, NULL);
 			if (IS_ERR(vma)) {
 				err = PTR_ERR(vma);
 				goto out_put;
@@ -457,7 +460,7 @@ out_device:
 static int igt_mock_ppgtt_misaligned_dma(void *arg)
 {
 	struct i915_hw_ppgtt *ppgtt = arg;
-	struct drm_i915_private *i915 = ppgtt->base.i915;
+	struct drm_i915_private *i915 = ppgtt->vm.i915;
 	unsigned long supported = INTEL_INFO(i915)->page_sizes;
 	struct drm_i915_gem_object *obj;
 	int bit;
@@ -499,7 +502,7 @@ static int igt_mock_ppgtt_misaligned_dma(void *arg)
 		/* Force the page size for this object */
 		obj->mm.page_sizes.sg = page_size;
 
-		vma = i915_vma_instance(obj, &ppgtt->base, NULL);
+		vma = i915_vma_instance(obj, &ppgtt->vm, NULL);
 		if (IS_ERR(vma)) {
 			err = PTR_ERR(vma);
 			goto out_unpin;
@@ -548,7 +551,7 @@ static int igt_mock_ppgtt_misaligned_dma(void *arg)
 			err = igt_check_page_sizes(vma);
 
 			if (vma->page_sizes.gtt != I915_GTT_PAGE_SIZE_4K) {
-				pr_err("page_sizes.gtt=%u, expected %lu\n",
+				pr_err("page_sizes.gtt=%u, expected %llu\n",
 				       vma->page_sizes.gtt, I915_GTT_PAGE_SIZE_4K);
 				err = -EINVAL;
 			}
@@ -569,6 +572,7 @@ static int igt_mock_ppgtt_misaligned_dma(void *arg)
 		i915_vma_close(vma);
 
 		i915_gem_object_unpin_pages(obj);
+		__i915_gem_object_put_pages(obj, I915_MM_NORMAL);
 		i915_gem_object_put(obj);
 	}
 
@@ -590,12 +594,13 @@ static void close_object_list(struct list_head *objects,
 	list_for_each_entry_safe(obj, on, objects, st_link) {
 		struct i915_vma *vma;
 
-		vma = i915_vma_instance(obj, &ppgtt->base, NULL);
+		vma = i915_vma_instance(obj, &ppgtt->vm, NULL);
 		if (!IS_ERR(vma))
 			i915_vma_close(vma);
 
 		list_del(&obj->st_link);
 		i915_gem_object_unpin_pages(obj);
+		__i915_gem_object_put_pages(obj, I915_MM_NORMAL);
 		i915_gem_object_put(obj);
 	}
 }
@@ -603,8 +608,8 @@ static void close_object_list(struct list_head *objects,
 static int igt_mock_ppgtt_huge_fill(void *arg)
 {
 	struct i915_hw_ppgtt *ppgtt = arg;
-	struct drm_i915_private *i915 = ppgtt->base.i915;
-	unsigned long max_pages = ppgtt->base.total >> PAGE_SHIFT;
+	struct drm_i915_private *i915 = ppgtt->vm.i915;
+	unsigned long max_pages = ppgtt->vm.total >> PAGE_SHIFT;
 	unsigned long page_num;
 	bool single = false;
 	LIST_HEAD(objects);
@@ -640,7 +645,7 @@ static int igt_mock_ppgtt_huge_fill(void *arg)
 
 		list_add(&obj->st_link, &objects);
 
-		vma = i915_vma_instance(obj, &ppgtt->base, NULL);
+		vma = i915_vma_instance(obj, &ppgtt->vm, NULL);
 		if (IS_ERR(vma)) {
 			err = PTR_ERR(vma);
 			break;
@@ -724,7 +729,7 @@ static int igt_mock_ppgtt_huge_fill(void *arg)
 static int igt_mock_ppgtt_64K(void *arg)
 {
 	struct i915_hw_ppgtt *ppgtt = arg;
-	struct drm_i915_private *i915 = ppgtt->base.i915;
+	struct drm_i915_private *i915 = ppgtt->vm.i915;
 	struct drm_i915_gem_object *obj;
 	const struct object_info {
 		unsigned int size;
@@ -818,7 +823,7 @@ static int igt_mock_ppgtt_64K(void *arg)
 			 */
 			obj->mm.page_sizes.sg &= ~I915_GTT_PAGE_SIZE_2M;
 
-			vma = i915_vma_instance(obj, &ppgtt->base, NULL);
+			vma = i915_vma_instance(obj, &ppgtt->vm, NULL);
 			if (IS_ERR(vma)) {
 				err = PTR_ERR(vma);
 				goto out_object_unpin;
@@ -865,6 +870,7 @@ static int igt_mock_ppgtt_64K(void *arg)
 			i915_vma_close(vma);
 
 			i915_gem_object_unpin_pages(obj);
+			__i915_gem_object_put_pages(obj, I915_MM_NORMAL);
 			i915_gem_object_put(obj);
 		}
 	}
@@ -886,8 +892,8 @@ out_object_put:
 static struct i915_vma *
 gpu_write_dw(struct i915_vma *vma, u64 offset, u32 val)
 {
-	struct drm_i915_private *i915 = to_i915(vma->obj->base.dev);
-	const int gen = INTEL_GEN(vma->vm->i915);
+	struct drm_i915_private *i915 = vma->vm->i915;
+	const int gen = INTEL_GEN(i915);
 	unsigned int count = vma->size >> PAGE_SHIFT;
 	struct drm_i915_gem_object *obj;
 	struct i915_vma *batch;
@@ -902,7 +908,11 @@ gpu_write_dw(struct i915_vma *vma, u64 offset, u32 val)
 	if (IS_ERR(obj))
 		return ERR_CAST(obj);
 
-	cmd = i915_gem_object_pin_map(obj, I915_MAP_WB);
+	err = i915_gem_object_set_to_wc_domain(obj, true);
+	if (err)
+		goto err;
+
+	cmd = i915_gem_object_pin_map(obj, I915_MAP_WC);
 	if (IS_ERR(cmd)) {
 		err = PTR_ERR(cmd);
 		goto err;
@@ -918,12 +928,12 @@ gpu_write_dw(struct i915_vma *vma, u64 offset, u32 val)
 			*cmd++ = val;
 		} else if (gen >= 4) {
 			*cmd++ = MI_STORE_DWORD_IMM_GEN4 |
-				(gen < 6 ? 1 << 22 : 0);
+				(gen < 6 ? MI_USE_GGTT : 0);
 			*cmd++ = 0;
 			*cmd++ = offset;
 			*cmd++ = val;
 		} else {
-			*cmd++ = MI_STORE_DWORD_IMM | 1 << 22;
+			*cmd++ = MI_STORE_DWORD_IMM | MI_MEM_VIRTUAL;
 			*cmd++ = offset;
 			*cmd++ = val;
 		}
@@ -932,12 +942,9 @@ gpu_write_dw(struct i915_vma *vma, u64 offset, u32 val)
 	}
 
 	*cmd = MI_BATCH_BUFFER_END;
+	i915_gem_chipset_flush(i915);
 
 	i915_gem_object_unpin_map(obj);
-
-	err = i915_gem_object_set_to_gtt_domain(obj, false);
-	if (err)
-		goto err;
 
 	batch = i915_vma_instance(obj, vma->vm, NULL);
 	if (IS_ERR(batch)) {
@@ -963,7 +970,7 @@ static int gpu_write(struct i915_vma *vma,
 		     u32 dword,
 		     u32 value)
 {
-	struct drm_i915_gem_request *rq;
+	struct i915_request *rq;
 	struct i915_vma *batch;
 	int flags = 0;
 	int err;
@@ -974,7 +981,7 @@ static int gpu_write(struct i915_vma *vma,
 	if (err)
 		return err;
 
-	rq = i915_gem_request_alloc(engine, ctx);
+	rq = i915_request_alloc(engine, ctx);
 	if (IS_ERR(rq))
 		return PTR_ERR(rq);
 
@@ -984,33 +991,26 @@ static int gpu_write(struct i915_vma *vma,
 		goto err_request;
 	}
 
-	i915_vma_move_to_active(batch, rq, 0);
+	err = i915_vma_move_to_active(batch, rq, 0);
+	if (err)
+		goto err_request;
+
 	i915_gem_object_set_active_reference(batch->obj);
 	i915_vma_unpin(batch);
 	i915_vma_close(batch);
 
-	err = rq->engine->emit_flush(rq, EMIT_INVALIDATE);
+	err = engine->emit_bb_start(rq,
+				    batch->node.start, batch->node.size,
+				    flags);
 	if (err)
 		goto err_request;
 
-	err = i915_switch_context(rq);
+	err = i915_vma_move_to_active(vma, rq, EXEC_OBJECT_WRITE);
 	if (err)
-		goto err_request;
-
-	err = rq->engine->emit_bb_start(rq,
-					batch->node.start, batch->node.size,
-					flags);
-	if (err)
-		goto err_request;
-
-	i915_vma_move_to_active(vma, rq, EXEC_OBJECT_WRITE);
-
-	reservation_object_lock(vma->resv, NULL);
-	reservation_object_add_excl_fence(vma->resv, &rq->fence);
-	reservation_object_unlock(vma->resv);
+		i915_request_skip(rq, err);
 
 err_request:
-	__i915_add_request(rq, err == 0);
+	i915_request_add(rq);
 
 	return err;
 }
@@ -1047,19 +1047,80 @@ static int cpu_check(struct drm_i915_gem_object *obj, u32 dword, u32 val)
 	return err;
 }
 
+static int __igt_write_huge(struct i915_gem_context *ctx,
+			    struct intel_engine_cs *engine,
+			    struct drm_i915_gem_object *obj,
+			    u64 size, u64 offset,
+			    u32 dword, u32 val)
+{
+	struct drm_i915_private *i915 = to_i915(obj->base.dev);
+	struct i915_address_space *vm =
+		ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
+	unsigned int flags = PIN_USER | PIN_OFFSET_FIXED;
+	struct i915_vma *vma;
+	int err;
+
+	vma = i915_vma_instance(obj, vm, NULL);
+	if (IS_ERR(vma))
+		return PTR_ERR(vma);
+
+	err = i915_vma_unbind(vma);
+	if (err)
+		goto out_vma_close;
+
+	err = i915_vma_pin(vma, size, 0, flags | offset);
+	if (err) {
+		/*
+		 * The ggtt may have some pages reserved so
+		 * refrain from erroring out.
+		 */
+		if (err == -ENOSPC && i915_is_ggtt(vm))
+			err = 0;
+
+		goto out_vma_close;
+	}
+
+	err = igt_check_page_sizes(vma);
+	if (err)
+		goto out_vma_unpin;
+
+	err = gpu_write(vma, ctx, engine, dword, val);
+	if (err) {
+		pr_err("gpu-write failed at offset=%llx\n", offset);
+		goto out_vma_unpin;
+	}
+
+	err = cpu_check(obj, dword, val);
+	if (err) {
+		pr_err("cpu-check failed at offset=%llx\n", offset);
+		goto out_vma_unpin;
+	}
+
+out_vma_unpin:
+	i915_vma_unpin(vma);
+out_vma_close:
+	i915_vma_destroy(vma);
+
+	return err;
+}
+
 static int igt_write_huge(struct i915_gem_context *ctx,
 			  struct drm_i915_gem_object *obj)
 {
 	struct drm_i915_private *i915 = to_i915(obj->base.dev);
-	struct i915_address_space *vm = ctx->ppgtt ? &ctx->ppgtt->base : &i915->ggtt.base;
+	struct i915_address_space *vm =
+		ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
+	static struct intel_engine_cs *engines[I915_NUM_ENGINES];
 	struct intel_engine_cs *engine;
-	struct i915_vma *vma;
-	unsigned int flags = PIN_USER | PIN_OFFSET_FIXED;
+	I915_RND_STATE(prng);
+	IGT_TIMEOUT(end_time);
 	unsigned int max_page_size;
 	unsigned int id;
 	u64 max;
 	u64 num;
 	u64 size;
+	int *order;
+	int i, n;
 	int err = 0;
 
 	GEM_BUG_ON(!i915_gem_object_has_pinned_pages(obj));
@@ -1071,78 +1132,56 @@ static int igt_write_huge(struct i915_gem_context *ctx,
 	max_page_size = rounddown_pow_of_two(obj->mm.page_sizes.sg);
 	max = div_u64((vm->total - size), max_page_size);
 
-	vma = i915_vma_instance(obj, vm, NULL);
-	if (IS_ERR(vma))
-		return PTR_ERR(vma);
-
+	n = 0;
 	for_each_engine(engine, i915, id) {
-		IGT_TIMEOUT(end_time);
-
 		if (!intel_engine_can_store_dword(engine)) {
-			pr_info("store-dword-imm not supported on engine=%u\n",
-				id);
+			pr_info("store-dword-imm not supported on engine=%u\n", id);
 			continue;
 		}
-
-		/*
-		 * Try various offsets until we timeout -- we want to avoid
-		 * issues hidden by effectively always using offset = 0.
-		 */
-		for_each_prime_number_from(num, 0, max) {
-			u64 offset = num * max_page_size;
-			u32 dword;
-
-			err = i915_vma_unbind(vma);
-			if (err)
-				goto out_vma_close;
-
-			err = i915_vma_pin(vma, size, max_page_size, flags | offset);
-			if (err) {
-				/*
-				 * The ggtt may have some pages reserved so
-				 * refrain from erroring out.
-				 */
-				if (err == -ENOSPC && i915_is_ggtt(vm)) {
-					err = 0;
-					continue;
-				}
-
-				goto out_vma_close;
-			}
-
-			err = igt_check_page_sizes(vma);
-			if (err)
-				goto out_vma_unpin;
-
-			dword = offset_in_page(num) / 4;
-
-			err = gpu_write(vma, ctx, engine, dword, num + 1);
-			if (err) {
-				pr_err("gpu-write failed at offset=%llx", offset);
-				goto out_vma_unpin;
-			}
-
-			err = cpu_check(obj, dword, num + 1);
-			if (err) {
-				pr_err("cpu-check failed at offset=%llx", offset);
-				goto out_vma_unpin;
-			}
-
-			i915_vma_unpin(vma);
-
-			if (num > 0 &&
-			    igt_timeout(end_time,
-					"%s timed out on engine=%u at offset=%llx, max_page_size=%x\n",
-					__func__, id, offset, max_page_size))
-				break;
-		}
+		engines[n++] = engine;
 	}
 
-out_vma_unpin:
-	if (i915_vma_is_pinned(vma))
-		i915_vma_unpin(vma);
-out_vma_close:
-	i915_vma_close(vma);
+	if (!n)
+		return 0;
+
+	/*
+	 * To keep things interesting when alternating between engines in our
+	 * randomized order, lets also make feeding to the same engine a few
+	 * times in succession a possibility by enlarging the permutation array.
+	 */
+	order = i915_random_order(n * I915_NUM_ENGINES, &prng);
+	if (!order)
+		return -ENOMEM;
+
+	/*
+	 * Try various offsets in an ascending/descending fashion until we
+	 * timeout -- we want to avoid issues hidden by effectively always using
+	 * offset = 0.
+	 */
+	i = 0;
+	for_each_prime_number_from(num, 0, max) {
+		u64 offset_low = num * max_page_size;
+		u64 offset_high = (max - num) * max_page_size;
+		u32 dword = offset_in_page(num) / 4;
+
+		engine = engines[order[i] % n];
+		i = (i + 1) % (n * I915_NUM_ENGINES);
+
+		err = __igt_write_huge(ctx, engine, obj, size, offset_low, dword, num + 1);
+		if (err)
+			break;
+
+		err = __igt_write_huge(ctx, engine, obj, size, offset_high, dword, num + 1);
+		if (err)
+			break;
+
+		if (igt_timeout(end_time,
+				"%s timed out on engine=%u, offset_low=%llx offset_high=%llx, max_page_size=%x\n",
+				__func__, engine->id, offset_low, offset_high, max_page_size))
+			break;
+	}
+
+	kfree(order);
 
 	return err;
 }
@@ -1158,6 +1197,9 @@ static int igt_ppgtt_exhaust_huge(void *arg)
 	unsigned int page_mask;
 	int n, i;
 	int err = -ENODEV;
+
+	if (supported == I915_GTT_PAGE_SIZE_4K)
+		return 0;
 
 	/*
 	 * Sanity check creating objects with a varying mix of page sizes --
@@ -1229,6 +1271,7 @@ static int igt_ppgtt_exhaust_huge(void *arg)
 			}
 
 			i915_gem_object_unpin_pages(obj);
+			__i915_gem_object_put_pages(obj, I915_MM_NORMAL);
 			i915_gem_object_put(obj);
 		}
 	}
@@ -1290,6 +1333,7 @@ static int igt_ppgtt_internal_huge(void *arg)
 		}
 
 		i915_gem_object_unpin_pages(obj);
+		__i915_gem_object_put_pages(obj, I915_MM_NORMAL);
 		i915_gem_object_put(obj);
 	}
 
@@ -1358,6 +1402,7 @@ static int igt_ppgtt_gemfs_huge(void *arg)
 		}
 
 		i915_gem_object_unpin_pages(obj);
+		__i915_gem_object_put_pages(obj, I915_MM_NORMAL);
 		i915_gem_object_put(obj);
 	}
 
@@ -1406,7 +1451,7 @@ static int igt_ppgtt_pin_update(void *arg)
 		if (IS_ERR(obj))
 			return PTR_ERR(obj);
 
-		vma = i915_vma_instance(obj, &ppgtt->base, NULL);
+		vma = i915_vma_instance(obj, &ppgtt->vm, NULL);
 		if (IS_ERR(vma)) {
 			err = PTR_ERR(vma);
 			goto out_put;
@@ -1460,7 +1505,7 @@ static int igt_ppgtt_pin_update(void *arg)
 	if (IS_ERR(obj))
 		return PTR_ERR(obj);
 
-	vma = i915_vma_instance(obj, &ppgtt->base, NULL);
+	vma = i915_vma_instance(obj, &ppgtt->vm, NULL);
 	if (IS_ERR(vma)) {
 		err = PTR_ERR(vma);
 		goto out_put;
@@ -1498,7 +1543,8 @@ static int igt_tmpfs_fallback(void *arg)
 	struct i915_gem_context *ctx = arg;
 	struct drm_i915_private *i915 = ctx->i915;
 	struct vfsmount *gemfs = i915->mm.gemfs;
-	struct i915_address_space *vm = ctx->ppgtt ? &ctx->ppgtt->base : &i915->ggtt.base;
+	struct i915_address_space *vm =
+		ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
 	struct drm_i915_gem_object *obj;
 	struct i915_vma *vma;
 	u32 *vaddr;
@@ -1554,7 +1600,8 @@ static int igt_shrink_thp(void *arg)
 {
 	struct i915_gem_context *ctx = arg;
 	struct drm_i915_private *i915 = ctx->i915;
-	struct i915_address_space *vm = ctx->ppgtt ? &ctx->ppgtt->base : &i915->ggtt.base;
+	struct i915_address_space *vm =
+		ctx->ppgtt ? &ctx->ppgtt->vm : &i915->ggtt.vm;
 	struct drm_i915_gem_object *obj;
 	struct i915_vma *vma;
 	unsigned int flags = PIN_USER;
@@ -1604,7 +1651,7 @@ static int igt_shrink_thp(void *arg)
 	 * shmem to truncate our pages.
 	 */
 	i915_gem_shrink_all(i915);
-	if (!IS_ERR_OR_NULL(obj->mm.pages)) {
+	if (i915_gem_object_has_pages(obj)) {
 		pr_err("shrink-all didn't truncate the pages\n");
 		err = -EINVAL;
 		goto out_close;
@@ -1657,20 +1704,20 @@ int i915_gem_huge_page_mock_selftests(void)
 	dma_coerce_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(39));
 
 	mutex_lock(&dev_priv->drm.struct_mutex);
-	ppgtt = i915_ppgtt_create(dev_priv, ERR_PTR(-ENODEV), "mock");
+	ppgtt = i915_ppgtt_create(dev_priv, ERR_PTR(-ENODEV));
 	if (IS_ERR(ppgtt)) {
 		err = PTR_ERR(ppgtt);
 		goto out_unlock;
 	}
 
-	if (!i915_vm_is_48bit(&ppgtt->base)) {
+	if (!i915_vm_is_48bit(&ppgtt->vm)) {
 		pr_err("failed to create 48b PPGTT\n");
 		err = -EINVAL;
 		goto out_close;
 	}
 
 	/* If we were ever hit this then it's time to mock the 64K scratch */
-	if (!i915_vm_has_scratch_64K(&ppgtt->base)) {
+	if (!i915_vm_has_scratch_64K(&ppgtt->vm)) {
 		pr_err("PPGTT missing 64K scratch page\n");
 		err = -EINVAL;
 		goto out_close;
@@ -1679,7 +1726,7 @@ int i915_gem_huge_page_mock_selftests(void)
 	err = i915_subtests(tests, ppgtt);
 
 out_close:
-	i915_ppgtt_close(&ppgtt->base);
+	i915_ppgtt_close(&ppgtt->vm);
 	i915_ppgtt_put(ppgtt);
 
 out_unlock:
@@ -1687,7 +1734,7 @@ out_unlock:
 
 	i915_modparams.enable_ppgtt = saved_ppgtt;
 
-	drm_dev_unref(&dev_priv->drm);
+	drm_dev_put(&dev_priv->drm);
 
 	return err;
 }
@@ -1711,11 +1758,15 @@ int i915_gem_huge_page_live_selftests(struct drm_i915_private *dev_priv)
 		return 0;
 	}
 
+	if (i915_terminally_wedged(&dev_priv->gpu_error))
+		return 0;
+
 	file = mock_file(dev_priv);
 	if (IS_ERR(file))
 		return PTR_ERR(file);
 
 	mutex_lock(&dev_priv->drm.struct_mutex);
+	intel_runtime_pm_get(dev_priv);
 
 	ctx = live_context(dev_priv, file);
 	if (IS_ERR(ctx)) {
@@ -1723,9 +1774,13 @@ int i915_gem_huge_page_live_selftests(struct drm_i915_private *dev_priv)
 		goto out_unlock;
 	}
 
+	if (ctx->ppgtt)
+		ctx->ppgtt->vm.scrub_64K = true;
+
 	err = i915_subtests(tests, ctx);
 
 out_unlock:
+	intel_runtime_pm_put(dev_priv);
 	mutex_unlock(&dev_priv->drm.struct_mutex);
 
 	mock_file_free(dev_priv, file);

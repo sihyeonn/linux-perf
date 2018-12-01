@@ -229,6 +229,12 @@ struct hda_device_id {
 	unsigned long driver_data;
 };
 
+struct sdw_device_id {
+	__u16 mfg_id;
+	__u16 part_id;
+	kernel_ulong_t driver_data;
+};
+
 /*
  * Struct used for matching a device
  */
@@ -452,6 +458,30 @@ struct spi_device_id {
 	kernel_ulong_t driver_data;	/* Data private to the driver */
 };
 
+/* SLIMbus */
+
+#define SLIMBUS_NAME_SIZE	32
+#define SLIMBUS_MODULE_PREFIX	"slim:"
+
+struct slim_device_id {
+	__u16 manf_id, prod_code;
+	__u16 dev_index, instance;
+
+	/* Data private to the driver */
+	kernel_ulong_t driver_data;
+};
+
+#define APR_NAME_SIZE	32
+#define APR_MODULE_PREFIX "apr:"
+
+struct apr_device_id {
+	char name[APR_NAME_SIZE];
+	__u32 domain_id;
+	__u32 svc_id;
+	__u32 svc_version;
+	kernel_ulong_t driver_data;	/* Data private to the driver */
+};
+
 #define SPMI_NAME_SIZE	32
 #define SPMI_MODULE_PREFIX "spmi:"
 
@@ -471,6 +501,7 @@ enum dmi_field {
 	DMI_PRODUCT_VERSION,
 	DMI_PRODUCT_SERIAL,
 	DMI_PRODUCT_UUID,
+	DMI_PRODUCT_SKU,
 	DMI_PRODUCT_FAMILY,
 	DMI_BOARD_VENDOR,
 	DMI_BOARD_NAME,
@@ -483,6 +514,7 @@ enum dmi_field {
 	DMI_CHASSIS_SERIAL,
 	DMI_CHASSIS_ASSET_TAG,
 	DMI_STRING_MAX,
+	DMI_OEM_STRING,	/* special case - will not be in dmi_ident */
 };
 
 struct dmi_strmatch {
@@ -713,5 +745,21 @@ struct tb_service_id {
 #define TBSVC_MATCH_PROTOCOL_ID		0x0002
 #define TBSVC_MATCH_PROTOCOL_VERSION	0x0004
 #define TBSVC_MATCH_PROTOCOL_REVISION	0x0008
+
+/* USB Type-C Alternate Modes */
+
+#define TYPEC_ANY_MODE	0x7
+
+/**
+ * struct typec_device_id - USB Type-C alternate mode identifiers
+ * @svid: Standard or Vendor ID
+ * @mode: Mode index
+ * @driver_data: Driver specific data
+ */
+struct typec_device_id {
+	__u16 svid;
+	__u8 mode;
+	kernel_ulong_t driver_data;
+};
 
 #endif /* LINUX_MOD_DEVICETABLE_H */

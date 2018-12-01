@@ -65,7 +65,6 @@ struct usb_dev_state {
 	const struct cred *cred;
 	void __user *disccontext;
 	unsigned long ifclaimed;
-	u32 secid;
 	u32 disabled_bulk_eps;
 	bool privileges_dropped;
 	unsigned long interface_allowed_mask;
@@ -95,7 +94,6 @@ struct async {
 	struct usb_memory *usbm;
 	unsigned int mem_usage;
 	int status;
-	u32 secid;
 	u8 bulk_addr;
 	u8 bulk_status;
 };
@@ -584,25 +582,24 @@ static void async_completed(struct urb *urb)
 {
 	struct async *as = urb->context;
 	struct usb_dev_state *ps = as->ps;
-	struct siginfo sinfo;
+	struct kernel_siginfo sinfo;
 	struct pid *pid = NULL;
-	u32 secid = 0;
 	const struct cred *cred = NULL;
+	unsigned long flags;
 	int signr;
 
-	spin_lock(&ps->lock);
+	spin_lock_irqsave(&ps->lock, flags);
 	list_move_tail(&as->asynclist, &ps->async_completed);
 	as->status = urb->status;
 	signr = as->signr;
 	if (signr) {
-		memset(&sinfo, 0, sizeof(sinfo));
+		clear_siginfo(&sinfo);
 		sinfo.si_signo = as->signr;
 		sinfo.si_errno = as->status;
 		sinfo.si_code = SI_ASYNCIO;
 		sinfo.si_addr = as->userurb;
 		pid = get_pid(as->pid);
 		cred = get_cred(as->cred);
-		secid = as->secid;
 	}
 	snoop(&urb->dev->dev, "urb complete\n");
 	snoop_urb(urb->dev, as->userurb, urb->pipe, urb->actual_length,
@@ -615,10 +612,10 @@ static void async_completed(struct urb *urb)
 		cancel_bulk_urbs(ps, as->bulk_addr);
 
 	wake_up(&ps->wait);
-	spin_unlock(&ps->lock);
+	spin_unlock_irqrestore(&ps->lock, flags);
 
 	if (signr) {
-		kill_pid_info_as_cred(sinfo.si_signo, &sinfo, pid, cred, secid);
+		kill_pid_info_as_cred(sinfo.si_signo, &sinfo, pid, cred);
 		put_pid(pid);
 		put_cred(cred);
 	}
@@ -901,7 +898,7 @@ static int parse_usbdevfs_streams(struct usb_dev_state *ps,
 	if (num_streams_ret && (num_streams < 2 || num_streams > 65536))
 		return -EINVAL;
 
-	eps = kmalloc(num_eps * sizeof(*eps), GFP_KERNEL);
+	eps = kmalloc_array(num_eps, sizeof(*eps), GFP_KERNEL);
 	if (!eps)
 		return -ENOMEM;
 
@@ -1013,7 +1010,6 @@ static int usbdev_open(struct inode *inode, struct file *file)
 	init_waitqueue_head(&ps->wait);
 	ps->disc_pid = get_pid(task_pid(current));
 	ps->cred = get_current_cred();
-	security_task_getsecid(current, &ps->secid);
 	smp_wmb();
 	list_add_tail(&ps->list, &dev->filelist);
 	file->private_data = ps;
@@ -1438,18 +1434,25 @@ static int proc_do_submiturb(struct usb_dev_state *ps, struct usbdevfs_urb *uurb
 	struct async *as = NULL;
 	struct usb_ctrlrequest *dr = NULL;
 	unsigned int u, totlen, isofrmlen;
-	int i, ret, is_in, num_sgs = 0, ifnum = -1;
+	int i, ret, num_sgs = 0, ifnum = -1;
 	int number_of_packets = 0;
 	unsigned int stream_id = 0;
 	void *buf;
-
-	if (uurb->flags & ~(USBDEVFS_URB_ISO_ASAP |
-				USBDEVFS_URB_SHORT_NOT_OK |
+	bool is_in;
+	bool allow_short = false;
+	bool allow_zero = false;
+	unsigned long mask =	USBDEVFS_URB_SHORT_NOT_OK |
 				USBDEVFS_URB_BULK_CONTINUATION |
 				USBDEVFS_URB_NO_FSBR |
 				USBDEVFS_URB_ZERO_PACKET |
-				USBDEVFS_URB_NO_INTERRUPT))
-		return -EINVAL;
+				USBDEVFS_URB_NO_INTERRUPT;
+	/* USBDEVFS_URB_ISO_ASAP is a special case */
+	if (uurb->type == USBDEVFS_URB_TYPE_ISO)
+		mask |= USBDEVFS_URB_ISO_ASAP;
+
+	if (uurb->flags & ~mask)
+			return -EINVAL;
+
 	if ((unsigned int)uurb->buffer_length >= USBFS_XFER_MAX)
 		return -EINVAL;
 	if (uurb->buffer_length > 0 && !uurb->buffer)
@@ -1500,6 +1503,8 @@ static int proc_do_submiturb(struct usb_dev_state *ps, struct usbdevfs_urb *uurb
 			is_in = 0;
 			uurb->endpoint &= ~USB_DIR_IN;
 		}
+		if (is_in)
+			allow_short = true;
 		snoop(&ps->dev->dev, "control urb: bRequestType=%02x "
 			"bRequest=%02x wValue=%04x "
 			"wIndex=%04x wLength=%04x\n",
@@ -1511,6 +1516,10 @@ static int proc_do_submiturb(struct usb_dev_state *ps, struct usbdevfs_urb *uurb
 		break;
 
 	case USBDEVFS_URB_TYPE_BULK:
+		if (!is_in)
+			allow_zero = true;
+		else
+			allow_short = true;
 		switch (usb_endpoint_type(&ep->desc)) {
 		case USB_ENDPOINT_XFER_CONTROL:
 		case USB_ENDPOINT_XFER_ISOC:
@@ -1531,6 +1540,10 @@ static int proc_do_submiturb(struct usb_dev_state *ps, struct usbdevfs_urb *uurb
 		if (!usb_endpoint_xfer_int(&ep->desc))
 			return -EINVAL;
  interrupt_urb:
+		if (!is_in)
+			allow_zero = true;
+		else
+			allow_short = true;
 		break;
 
 	case USBDEVFS_URB_TYPE_ISO:
@@ -1603,8 +1616,9 @@ static int proc_do_submiturb(struct usb_dev_state *ps, struct usbdevfs_urb *uurb
 	as->mem_usage = u;
 
 	if (num_sgs) {
-		as->urb->sg = kmalloc(num_sgs * sizeof(struct scatterlist),
-				      GFP_KERNEL);
+		as->urb->sg = kmalloc_array(num_sgs,
+					    sizeof(struct scatterlist),
+					    GFP_KERNEL);
 		if (!as->urb->sg) {
 			ret = -ENOMEM;
 			goto error;
@@ -1675,15 +1689,18 @@ static int proc_do_submiturb(struct usb_dev_state *ps, struct usbdevfs_urb *uurb
 	u = (is_in ? URB_DIR_IN : URB_DIR_OUT);
 	if (uurb->flags & USBDEVFS_URB_ISO_ASAP)
 		u |= URB_ISO_ASAP;
-	if (uurb->flags & USBDEVFS_URB_SHORT_NOT_OK && is_in)
+	if (allow_short && uurb->flags & USBDEVFS_URB_SHORT_NOT_OK)
 		u |= URB_SHORT_NOT_OK;
-	if (uurb->flags & USBDEVFS_URB_NO_FSBR)
-		u |= URB_NO_FSBR;
-	if (uurb->flags & USBDEVFS_URB_ZERO_PACKET)
+	if (allow_zero && uurb->flags & USBDEVFS_URB_ZERO_PACKET)
 		u |= URB_ZERO_PACKET;
 	if (uurb->flags & USBDEVFS_URB_NO_INTERRUPT)
 		u |= URB_NO_INTERRUPT;
 	as->urb->transfer_flags = u;
+
+	if (!allow_short && uurb->flags & USBDEVFS_URB_SHORT_NOT_OK)
+		dev_warn(&ps->dev->dev, "Requested nonsensical USBDEVFS_URB_SHORT_NOT_OK.\n");
+	if (!allow_zero && uurb->flags & USBDEVFS_URB_ZERO_PACKET)
+		dev_warn(&ps->dev->dev, "Requested nonsensical USBDEVFS_URB_ZERO_PACKET.\n");
 
 	as->urb->transfer_buffer_length = uurb->buffer_length;
 	as->urb->setup_packet = (unsigned char *)dr;
@@ -1725,7 +1742,6 @@ static int proc_do_submiturb(struct usb_dev_state *ps, struct usbdevfs_urb *uurb
 	as->ifnum = ifnum;
 	as->pid = get_pid(task_pid(current));
 	as->cred = get_current_cred();
-	security_task_getsecid(current, &as->secid);
 	snoop_urb(ps->dev, as->userurb, as->urb->pipe,
 			as->urb->transfer_buffer_length, 0, SUBMIT,
 			NULL, 0);
@@ -2568,19 +2584,19 @@ static long usbdev_compat_ioctl(struct file *file, unsigned int cmd,
 #endif
 
 /* No kernel lock - fine */
-static unsigned int usbdev_poll(struct file *file,
+static __poll_t usbdev_poll(struct file *file,
 				struct poll_table_struct *wait)
 {
 	struct usb_dev_state *ps = file->private_data;
-	unsigned int mask = 0;
+	__poll_t mask = 0;
 
 	poll_wait(file, &ps->wait, wait);
 	if (file->f_mode & FMODE_WRITE && !list_empty(&ps->async_completed))
-		mask |= POLLOUT | POLLWRNORM;
+		mask |= EPOLLOUT | EPOLLWRNORM;
 	if (!connected(ps))
-		mask |= POLLHUP;
+		mask |= EPOLLHUP;
 	if (list_empty(&ps->list))
-		mask |= POLLERR;
+		mask |= EPOLLERR;
 	return mask;
 }
 
@@ -2601,7 +2617,7 @@ const struct file_operations usbdev_file_operations = {
 static void usbdev_remove(struct usb_device *udev)
 {
 	struct usb_dev_state *ps;
-	struct siginfo sinfo;
+	struct kernel_siginfo sinfo;
 
 	while (!list_empty(&udev->filelist)) {
 		ps = list_entry(udev->filelist.next, struct usb_dev_state, list);
@@ -2609,13 +2625,13 @@ static void usbdev_remove(struct usb_device *udev)
 		wake_up_all(&ps->wait);
 		list_del_init(&ps->list);
 		if (ps->discsignr) {
-			memset(&sinfo, 0, sizeof(sinfo));
+			clear_siginfo(&sinfo);
 			sinfo.si_signo = ps->discsignr;
 			sinfo.si_errno = EPIPE;
 			sinfo.si_code = SI_ASYNCIO;
 			sinfo.si_addr = ps->disccontext;
 			kill_pid_info_as_cred(ps->discsignr, &sinfo,
-					ps->disc_pid, ps->cred, ps->secid);
+					ps->disc_pid, ps->cred);
 		}
 	}
 }

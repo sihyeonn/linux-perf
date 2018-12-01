@@ -1,12 +1,9 @@
-/*
- * Helper routines for R-Car sound ADG.
- *
- *  Copyright (C) 2013  Kuninori Morimoto <kuninori.morimoto.gx@renesas.com>
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
- */
+// SPDX-License-Identifier: GPL-2.0
+//
+// Helper routines for R-Car sound ADG.
+//
+//  Copyright (C) 2013  Kuninori Morimoto <kuninori.morimoto.gx@renesas.com>
+
 #include <linux/clk-provider.h>
 #include "rsnd.h"
 
@@ -222,7 +219,7 @@ int rsnd_adg_set_cmd_timsel_gen2(struct rsnd_mod *cmd_mod,
 				   NULL, &val, NULL);
 
 	val  = val	<< shift;
-	mask = 0xffff	<< shift;
+	mask = 0x0f1f	<< shift;
 
 	rsnd_mod_bset(adg_mod, CMDOUT_TIMSEL, mask, val);
 
@@ -250,7 +247,7 @@ int rsnd_adg_set_src_timesel_gen2(struct rsnd_mod *src_mod,
 
 	in   = in	<< shift;
 	out  = out	<< shift;
-	mask = 0xffff	<< shift;
+	mask = 0x0f1f	<< shift;
 
 	switch (id / 2) {
 	case 0:
@@ -380,7 +377,7 @@ int rsnd_adg_ssi_clk_try_start(struct rsnd_mod *ssi_mod, unsigned int rate)
 			ckr = 0x80000000;
 	}
 
-	rsnd_mod_bset(adg_mod, BRGCKR, 0x80FF0000, adg->ckr | ckr);
+	rsnd_mod_bset(adg_mod, BRGCKR, 0x80770000, adg->ckr | ckr);
 	rsnd_mod_write(adg_mod, BRRA,  adg->rbga);
 	rsnd_mod_write(adg_mod, BRRB,  adg->rbgb);
 
@@ -465,6 +462,11 @@ static void rsnd_adg_get_clkout(struct rsnd_priv *priv,
 		goto rsnd_adg_get_clkout_end;
 
 	req_size = prop->length / sizeof(u32);
+	if (req_size > REQ_SIZE) {
+		dev_err(dev,
+			"too many clock-frequency, use top %d\n", REQ_SIZE);
+		req_size = REQ_SIZE;
+	}
 
 	of_property_read_u32_array(np, "clock-frequency", req_rate, req_size);
 	req_48kHz_rate = 0;
@@ -580,7 +582,7 @@ static void rsnd_adg_clk_dbg_info(struct rsnd_priv *priv, struct rsnd_adg *adg)
 	int i;
 
 	for_each_rsnd_clk(clk, adg, i)
-		dev_dbg(dev, "%s    : %p : %ld\n",
+		dev_dbg(dev, "%s    : %pa : %ld\n",
 			clk_name[i], clk, clk_get_rate(clk));
 
 	dev_dbg(dev, "BRGCKR = 0x%08x, BRRA/BRRB = 0x%x/0x%x\n",
@@ -593,7 +595,7 @@ static void rsnd_adg_clk_dbg_info(struct rsnd_priv *priv, struct rsnd_adg *adg)
 	 * by BRGCKR::BRGCKR_31
 	 */
 	for_each_rsnd_clkout(clk, adg, i)
-		dev_dbg(dev, "clkout %d : %p : %ld\n", i,
+		dev_dbg(dev, "clkout %d : %pa : %ld\n", i,
 			clk, clk_get_rate(clk));
 }
 #else

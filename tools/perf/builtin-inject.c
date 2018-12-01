@@ -86,12 +86,10 @@ static int perf_event__drop_oe(struct perf_tool *tool __maybe_unused,
 }
 #endif
 
-static int perf_event__repipe_op2_synth(struct perf_tool *tool,
-					union perf_event *event,
-					struct perf_session *session
-					__maybe_unused)
+static int perf_event__repipe_op2_synth(struct perf_session *session,
+					union perf_event *event)
 {
-	return perf_event__repipe_synth(tool, event);
+	return perf_event__repipe_synth(session->tool, event);
 }
 
 static int perf_event__repipe_attr(struct perf_tool *tool,
@@ -133,10 +131,10 @@ static int copy_bytes(struct perf_inject *inject, int fd, off_t size)
 	return 0;
 }
 
-static s64 perf_event__repipe_auxtrace(struct perf_tool *tool,
-				       union perf_event *event,
-				       struct perf_session *session)
+static s64 perf_event__repipe_auxtrace(struct perf_session *session,
+				       union perf_event *event)
 {
+	struct perf_tool *tool = session->tool;
 	struct perf_inject *inject = container_of(tool, struct perf_inject,
 						  tool);
 	int ret;
@@ -174,9 +172,8 @@ static s64 perf_event__repipe_auxtrace(struct perf_tool *tool,
 #else
 
 static s64
-perf_event__repipe_auxtrace(struct perf_tool *tool __maybe_unused,
-			    union perf_event *event __maybe_unused,
-			    struct perf_session *session __maybe_unused)
+perf_event__repipe_auxtrace(struct perf_session *session __maybe_unused,
+			    union perf_event *event __maybe_unused)
 {
 	pr_err("AUX area tracing not supported\n");
 	return -EINVAL;
@@ -362,26 +359,24 @@ static int perf_event__repipe_exit(struct perf_tool *tool,
 	return err;
 }
 
-static int perf_event__repipe_tracing_data(struct perf_tool *tool,
-					   union perf_event *event,
-					   struct perf_session *session)
+static int perf_event__repipe_tracing_data(struct perf_session *session,
+					   union perf_event *event)
 {
 	int err;
 
-	perf_event__repipe_synth(tool, event);
-	err = perf_event__process_tracing_data(tool, event, session);
+	perf_event__repipe_synth(session->tool, event);
+	err = perf_event__process_tracing_data(session, event);
 
 	return err;
 }
 
-static int perf_event__repipe_id_index(struct perf_tool *tool,
-				       union perf_event *event,
-				       struct perf_session *session)
+static int perf_event__repipe_id_index(struct perf_session *session,
+				       union perf_event *event)
 {
 	int err;
 
-	perf_event__repipe_synth(tool, event);
-	err = perf_event__process_id_index(tool, event, session);
+	perf_event__repipe_synth(session->tool, event);
+	err = perf_event__process_id_index(session, event);
 
 	return err;
 }
@@ -440,9 +435,7 @@ static int perf_event__inject_buildid(struct perf_tool *tool,
 		goto repipe;
 	}
 
-	thread__find_addr_map(thread, sample->cpumode, MAP__FUNCTION, sample->ip, &al);
-
-	if (al.map != NULL) {
+	if (thread__find_map(thread, sample->cpumode, sample->ip, &al)) {
 		if (!al.map->dso->hit) {
 			al.map->dso->hit = 1;
 			if (map__load(al.map) >= 0) {
@@ -536,8 +529,7 @@ found:
 	sample_sw.period = sample->period;
 	sample_sw.time	 = sample->time;
 	perf_event__synthesize_sample(event_sw, evsel->attr.sample_type,
-				      evsel->attr.read_format, &sample_sw,
-				      false);
+				      evsel->attr.read_format, &sample_sw);
 	build_id__mark_dso_hit(tool, event_sw, &sample_sw, evsel, machine);
 	return perf_event__repipe(tool, event_sw, &sample_sw, machine);
 }
@@ -806,7 +798,8 @@ int cmd_inject(int argc, const char **argv)
 			   "kallsyms pathname"),
 		OPT_BOOLEAN('f', "force", &data.force, "don't complain, do it"),
 		OPT_CALLBACK_OPTARG(0, "itrace", &inject.itrace_synth_opts,
-				    NULL, "opts", "Instruction Tracing options",
+				    NULL, "opts", "Instruction Tracing options\n"
+				    ITRACE_HELP,
 				    itrace_parse_synth_opts),
 		OPT_BOOLEAN(0, "strip", &inject.strip,
 			    "strip non-synthesized events (use with --itrace)"),

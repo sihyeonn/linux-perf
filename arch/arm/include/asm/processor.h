@@ -11,12 +11,6 @@
 #ifndef __ASM_ARM_PROCESSOR_H
 #define __ASM_ARM_PROCESSOR_H
 
-/*
- * Default implementation of macro that returns current
- * instruction pointer ("program counter").
- */
-#define current_text_addr() ({ __label__ _l; _l: &&_l;})
-
 #ifdef __KERNEL__
 
 #include <asm/hw_breakpoint.h>
@@ -44,6 +38,16 @@ struct thread_struct {
 							/* debugging	  */
 	struct debug_info	debug;
 };
+
+/*
+ * Everything usercopied to/from thread_struct is statically-sized, so
+ * no hardened usercopy whitelist is needed.
+ */
+static inline void arch_thread_struct_whitelist(unsigned long *offset,
+						unsigned long *size)
+{
+	*offset = *size = 0;
+}
 
 #define INIT_THREAD  {	}
 

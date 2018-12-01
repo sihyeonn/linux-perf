@@ -710,7 +710,7 @@ vema_get_port(struct opa_vnic_ctrl_port *cport, u8 port_num)
 
 /**
  * opa_vnic_vema_send_trap -- This function sends a trap to the EM
- * @cport: pointer to vnic control port
+ * @adapter: pointer to vnic adapter
  * @data: pointer to trap data filled by calling function
  * @lid:  issuers lid (encap_slid from vesw_port_info)
  *
@@ -888,7 +888,8 @@ static void opa_vnic_event(struct ib_event_handler *handler,
 		return;
 
 	c_dbg("OPA_VNIC received event %d on device %s port %d\n",
-	      record->event, record->device->name, record->element.port_num);
+	      record->event, dev_name(&record->device->dev),
+	      record->element.port_num);
 
 	if (record->event == IB_EVENT_PORT_ERR)
 		idr_for_each(&port->vport_idr, vema_disable_vport, NULL);

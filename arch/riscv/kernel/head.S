@@ -47,6 +47,8 @@ ENTRY(_start)
 	/* Save hart ID and DTB physical address */
 	mv s0, a0
 	mv s1, a1
+	la a2, boot_cpu_hartid
+	REG_S a0, (a2)
 
 	/* Initialize page tables and relocate to virtual addresses */
 	la sp, init_thread_union + THREAD_SIZE
@@ -55,7 +57,7 @@ ENTRY(_start)
 
 	/* Restore C environment */
 	la tp, init_task
-	sw s0, TASK_TI_CPU(tp)
+	sw zero, TASK_TI_CPU(tp)
 
 	la sp, init_thread_union
 	li a0, ASM_THREAD_SIZE
@@ -64,7 +66,7 @@ ENTRY(_start)
 	/* Start the kernel */
 	mv a0, s0
 	mv a1, s1
-	call sbi_save
+	call parse_dtb
 	tail start_kernel
 
 relocate:
@@ -74,15 +76,15 @@ relocate:
 	sub a1, a1, a0
 	add ra, ra, a1
 
-	/* Point stvec to virtual address of intruction after sptbr write */
+	/* Point stvec to virtual address of intruction after satp write */
 	la a0, 1f
 	add a0, a0, a1
 	csrw stvec, a0
 
-	/* Compute sptbr for kernel page tables, but don't load it yet */
+	/* Compute satp for kernel page tables, but don't load it yet */
 	la a2, swapper_pg_dir
 	srl a2, a2, PAGE_SHIFT
-	li a1, SPTBR_MODE
+	li a1, SATP_MODE
 	or a2, a2, a1
 
 	/*
@@ -94,6 +96,7 @@ relocate:
 	or a0, a0, a1
 	sfence.vma
 	csrw sptbr, a0
+.align 2
 1:
 	/* Set trap vector to spin forever to help debug */
 	la a0, .Lsecondary_park
@@ -143,6 +146,7 @@ relocate:
 	tail smp_callin
 #endif
 
+.align 2
 .Lsecondary_park:
 	/* We lack SMP support or have too many harts, so park this hart */
 	wfi

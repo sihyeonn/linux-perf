@@ -82,7 +82,6 @@ TRACE_DEFINE_ENUM(CP_TRIMMED);
 		{ REQ_OP_WRITE,			"WRITE" },		\
 		{ REQ_OP_FLUSH,			"FLUSH" },		\
 		{ REQ_OP_DISCARD,		"DISCARD" },		\
-		{ REQ_OP_ZONE_REPORT,		"ZONE_REPORT" },	\
 		{ REQ_OP_SECURE_ERASE,		"SECURE_ERASE" },	\
 		{ REQ_OP_ZONE_RESET,		"ZONE_RESET" },		\
 		{ REQ_OP_WRITE_SAME,		"WRITE_SAME" },		\
@@ -147,7 +146,8 @@ TRACE_DEFINE_ENUM(CP_TRIMMED);
 		{ CP_NO_SPC_ROLL,	"no space roll forward" },	\
 		{ CP_NODE_NEED_CP,	"node needs cp" },		\
 		{ CP_FASTBOOT_MODE,	"fastboot mode" },		\
-		{ CP_SPEC_LOG_NUM,	"log type is 2" })
+		{ CP_SPEC_LOG_NUM,	"log type is 2" },		\
+		{ CP_RECOVER_DIR,	"dir needs recovery" })
 
 struct victim_sel_policy;
 struct f2fs_map_blocks;
@@ -490,7 +490,7 @@ DEFINE_EVENT(f2fs__truncate_node, f2fs_truncate_node,
 
 TRACE_EVENT(f2fs_truncate_partial_nodes,
 
-	TP_PROTO(struct inode *inode, nid_t nid[], int depth, int err),
+	TP_PROTO(struct inode *inode, nid_t *nid, int depth, int err),
 
 	TP_ARGS(inode, nid, depth, err),
 

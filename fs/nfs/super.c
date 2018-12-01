@@ -884,7 +884,7 @@ int nfs_show_stats(struct seq_file *m, struct dentry *root)
 #endif
 	seq_printf(m, "\n");
 
-	rpc_print_iostats(m, nfss->client);
+	rpc_clnt_show_stats(m, nfss->client);
 
 	return 0;
 }
@@ -2631,6 +2631,8 @@ struct dentry *nfs_fs_mount_common(struct nfs_server *server,
 		/* initial superblock/root creation */
 		mount_info->fill_super(s, mount_info);
 		nfs_get_cache_cookie(s, mount_info->parsed, mount_info->cloned);
+		if (!(server->flags & NFS_MOUNT_UNSHARED))
+			s->s_iflags |= SB_I_MULTIROOT;
 	}
 
 	mntroot = nfs_get_root(s, mount_info->mntfh, dev_name);
@@ -2897,7 +2899,7 @@ static int param_set_portnr(const char *val, const struct kernel_param *kp)
 	if (!val)
 		return -EINVAL;
 	ret = kstrtoul(val, 0, &num);
-	if (ret == -EINVAL || num > NFS_CALLBACK_MAXPORTNR)
+	if (ret || num > NFS_CALLBACK_MAXPORTNR)
 		return -EINVAL;
 	*((unsigned int *)kp->arg) = num;
 	return 0;

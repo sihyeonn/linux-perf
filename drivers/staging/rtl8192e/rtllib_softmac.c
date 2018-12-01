@@ -1680,19 +1680,19 @@ inline void rtllib_softmac_new_net(struct rtllib_device *ieee,
 		   (ssidbroad && !ssidset) || (!ssidbroad && ssidset))) ||
 		   (!apset && ssidset && ssidbroad && ssidmatch) ||
 		   (ieee->is_roaming && ssidset && ssidbroad && ssidmatch)) {
-			/* if the essid is hidden replace it with the
-			 * essid provided by the user.
+			/* Save the essid so that if it is hidden, it is
+			 * replaced with the essid provided by the user.
 			 */
 			if (!ssidbroad) {
-				strncpy(tmp_ssid, ieee->current_network.ssid,
-					IW_ESSID_MAX_SIZE);
+				memcpy(tmp_ssid, ieee->current_network.ssid,
+				       ieee->current_network.ssid_len);
 				tmp_ssid_len = ieee->current_network.ssid_len;
 			}
-			memcpy(&ieee->current_network, net,
-			       sizeof(struct rtllib_network));
+ 			memcpy(&ieee->current_network, net,
+ 			       sizeof(ieee->current_network));
 			if (!ssidbroad) {
-				strncpy(ieee->current_network.ssid, tmp_ssid,
-					IW_ESSID_MAX_SIZE);
+				memcpy(ieee->current_network.ssid, tmp_ssid,
+				       tmp_ssid_len);
 				ieee->current_network.ssid_len = tmp_ssid_len;
 			}
 			netdev_info(ieee->dev,
@@ -1968,7 +1968,7 @@ void rtllib_sta_ps_send_pspoll_frame(struct rtllib_device *ieee)
 
 static short rtllib_sta_ps_sleep(struct rtllib_device *ieee, u64 *time)
 {
-	int timeout = ieee->ps_timeout;
+	int timeout;
 	u8 dtim;
 	struct rt_pwr_save_ctrl *pPSC = &(ieee->PowerSaveControl);
 

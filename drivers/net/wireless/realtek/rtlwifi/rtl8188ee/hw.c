@@ -951,12 +951,8 @@ static bool _rtl88ee_init_mac(struct ieee80211_hw *hw)
 static void _rtl88ee_hw_configure(struct ieee80211_hw *hw)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
-	u8 reg_bw_opmode;
-	u32 reg_ratr, reg_prsr;
+	u32 reg_prsr;
 
-	reg_bw_opmode = BW_OPMODE_20MHZ;
-	reg_ratr = RATE_ALL_CCK | RATE_ALL_OFDM_AG |
-	    RATE_ALL_OFDM_1SS | RATE_ALL_OFDM_2SS;
 	reg_prsr = RATE_ALL_CCK | RATE_ALL_OFDM_AG;
 
 	rtl_write_dword(rtlpriv, REG_RRSR, reg_prsr);
@@ -1472,17 +1468,16 @@ void rtl88ee_card_disable(struct ieee80211_hw *hw)
 }
 
 void rtl88ee_interrupt_recognized(struct ieee80211_hw *hw,
-				  u32 *p_inta, u32 *p_intb,
-				  u32 *p_intc, u32 *p_intd)
+				  struct rtl_int *intvec)
 {
 	struct rtl_priv *rtlpriv = rtl_priv(hw);
 	struct rtl_pci *rtlpci = rtl_pcidev(rtl_pcipriv(hw));
 
-	*p_inta = rtl_read_dword(rtlpriv, ISR) & rtlpci->irq_mask[0];
-	rtl_write_dword(rtlpriv, ISR, *p_inta);
+	intvec->inta = rtl_read_dword(rtlpriv, ISR) & rtlpci->irq_mask[0];
+	rtl_write_dword(rtlpriv, ISR, intvec->inta);
 
-	*p_intb = rtl_read_dword(rtlpriv, REG_HISRE) & rtlpci->irq_mask[1];
-	rtl_write_dword(rtlpriv, REG_HISRE, *p_intb);
+	intvec->intb = rtl_read_dword(rtlpriv, REG_HISRE) & rtlpci->irq_mask[1];
+	rtl_write_dword(rtlpriv, REG_HISRE, intvec->intb);
 
 }
 

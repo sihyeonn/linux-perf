@@ -17,6 +17,7 @@
 #include <linux/irqchip/chained_irq.h>
 #include <linux/export.h>
 #include <linux/of.h>
+#include <linux/of_clk.h>
 #include <linux/of_address.h>
 #include <linux/of_device.h>
 #include <linux/of_irq.h>
@@ -83,7 +84,9 @@ sunxi_pinctrl_desc_find_function_by_name(struct sunxi_pinctrl *pctl,
 			struct sunxi_desc_function *func = pin->functions;
 
 			while (func->name) {
-				if (!strcmp(func->name, func_name))
+				if (!strcmp(func->name, func_name) &&
+					(!func->variant ||
+					func->variant & pctl->variant))
 					return func;
 
 				func++;
@@ -274,7 +277,7 @@ static unsigned long *sunxi_pctrl_build_pin_config(struct device_node *node,
 	if (!configlen)
 		return NULL;
 
-	pinconfig = kzalloc(configlen * sizeof(*pinconfig), GFP_KERNEL);
+	pinconfig = kcalloc(configlen, sizeof(*pinconfig), GFP_KERNEL);
 	if (!pinconfig)
 		return ERR_PTR(-ENOMEM);
 
@@ -329,15 +332,15 @@ static int sunxi_pctrl_dt_node_to_map(struct pinctrl_dev *pctldev,
 
 	function = sunxi_pctrl_parse_function_prop(node);
 	if (!function) {
-		dev_err(pctl->dev, "missing function property in node %s\n",
-			node->name);
+		dev_err(pctl->dev, "missing function property in node %pOFn\n",
+			node);
 		return -EINVAL;
 	}
 
 	pin_prop = sunxi_pctrl_find_pins_prop(node, &npins);
 	if (!pin_prop) {
-		dev_err(pctl->dev, "missing pins property in node %s\n",
-			node->name);
+		dev_err(pctl->dev, "missing pins property in node %pOFn\n",
+			node);
 		return -EINVAL;
 	}
 
@@ -349,7 +352,7 @@ static int sunxi_pctrl_dt_node_to_map(struct pinctrl_dev *pctldev,
 	 * any configuration.
 	 */
 	nmaps = npins * 2;
-	*map = kmalloc(nmaps * sizeof(struct pinctrl_map), GFP_KERNEL);
+	*map = kmalloc_array(nmaps, sizeof(struct pinctrl_map), GFP_KERNEL);
 	if (!*map)
 		return -ENOMEM;
 
@@ -832,7 +835,7 @@ static void sunxi_pinctrl_irq_release_resources(struct irq_data *d)
 static int sunxi_pinctrl_irq_set_type(struct irq_data *d, unsigned int type)
 {
 	struct sunxi_pinctrl *pctl = irq_data_get_irq_chip_data(d);
-	u32 reg = sunxi_irq_cfg_reg(d->hwirq, pctl->desc->irq_bank_base);
+	u32 reg = sunxi_irq_cfg_reg(pctl->desc, d->hwirq);
 	u8 index = sunxi_irq_cfg_offset(d->hwirq);
 	unsigned long flags;
 	u32 regval;
@@ -879,8 +882,7 @@ static int sunxi_pinctrl_irq_set_type(struct irq_data *d, unsigned int type)
 static void sunxi_pinctrl_irq_ack(struct irq_data *d)
 {
 	struct sunxi_pinctrl *pctl = irq_data_get_irq_chip_data(d);
-	u32 status_reg = sunxi_irq_status_reg(d->hwirq,
-					      pctl->desc->irq_bank_base);
+	u32 status_reg = sunxi_irq_status_reg(pctl->desc, d->hwirq);
 	u8 status_idx = sunxi_irq_status_offset(d->hwirq);
 
 	/* Clear the IRQ */
@@ -890,7 +892,7 @@ static void sunxi_pinctrl_irq_ack(struct irq_data *d)
 static void sunxi_pinctrl_irq_mask(struct irq_data *d)
 {
 	struct sunxi_pinctrl *pctl = irq_data_get_irq_chip_data(d);
-	u32 reg = sunxi_irq_ctrl_reg(d->hwirq, pctl->desc->irq_bank_base);
+	u32 reg = sunxi_irq_ctrl_reg(pctl->desc, d->hwirq);
 	u8 idx = sunxi_irq_ctrl_offset(d->hwirq);
 	unsigned long flags;
 	u32 val;
@@ -907,7 +909,7 @@ static void sunxi_pinctrl_irq_mask(struct irq_data *d)
 static void sunxi_pinctrl_irq_unmask(struct irq_data *d)
 {
 	struct sunxi_pinctrl *pctl = irq_data_get_irq_chip_data(d);
-	u32 reg = sunxi_irq_ctrl_reg(d->hwirq, pctl->desc->irq_bank_base);
+	u32 reg = sunxi_irq_ctrl_reg(pctl->desc, d->hwirq);
 	u8 idx = sunxi_irq_ctrl_offset(d->hwirq);
 	unsigned long flags;
 	u32 val;
@@ -999,7 +1001,7 @@ static void sunxi_pinctrl_irq_handler(struct irq_desc *desc)
 	if (bank == pctl->desc->irq_banks)
 		return;
 
-	reg = sunxi_irq_status_reg_from_bank(bank, pctl->desc->irq_bank_base);
+	reg = sunxi_irq_status_reg_from_bank(pctl->desc, bank);
 	val = readl(pctl->membase + reg);
 
 	if (val) {
@@ -1040,6 +1042,7 @@ static int sunxi_pinctrl_add_function(struct sunxi_pinctrl *pctl,
 static int sunxi_pinctrl_build_state(struct platform_device *pdev)
 {
 	struct sunxi_pinctrl *pctl = platform_get_drvdata(pdev);
+	void *ptr;
 	int i;
 
 	/*
@@ -1053,8 +1056,8 @@ static int sunxi_pinctrl_build_state(struct platform_device *pdev)
 	 * this means that the number of pins is the maximum group
 	 * number we will ever see.
 	 */
-	pctl->groups = devm_kzalloc(&pdev->dev,
-				    pctl->desc->npins * sizeof(*pctl->groups),
+	pctl->groups = devm_kcalloc(&pdev->dev,
+				    pctl->desc->npins, sizeof(*pctl->groups),
 				    GFP_KERNEL);
 	if (!pctl->groups)
 		return -ENOMEM;
@@ -1077,9 +1080,9 @@ static int sunxi_pinctrl_build_state(struct platform_device *pdev)
 	 * We suppose that we won't have any more functions than pins,
 	 * we'll reallocate that later anyway
 	 */
-	pctl->functions = devm_kzalloc(&pdev->dev,
-				       pctl->ngroups * sizeof(*pctl->functions),
-				       GFP_KERNEL);
+	pctl->functions = kcalloc(pctl->ngroups,
+				  sizeof(*pctl->functions),
+				  GFP_KERNEL);
 	if (!pctl->functions)
 		return -ENOMEM;
 
@@ -1106,13 +1109,15 @@ static int sunxi_pinctrl_build_state(struct platform_device *pdev)
 	}
 
 	/* And now allocated and fill the array for real */
-	pctl->functions = krealloc(pctl->functions,
-				   pctl->nfunctions * sizeof(*pctl->functions),
-				   GFP_KERNEL);
-	if (!pctl->functions) {
+	ptr = krealloc(pctl->functions,
+		       pctl->nfunctions * sizeof(*pctl->functions),
+		       GFP_KERNEL);
+	if (!ptr) {
 		kfree(pctl->functions);
+		pctl->functions = NULL;
 		return -ENOMEM;
 	}
+	pctl->functions = ptr;
 
 	for (i = 0; i < pctl->desc->npins; i++) {
 		const struct sunxi_desc_pin *pin = pctl->desc->pins + i;
@@ -1130,16 +1135,21 @@ static int sunxi_pinctrl_build_state(struct platform_device *pdev)
 
 			func_item = sunxi_pinctrl_find_function_by_name(pctl,
 									func->name);
-			if (!func_item)
+			if (!func_item) {
+				kfree(pctl->functions);
 				return -EINVAL;
+			}
 
 			if (!func_item->groups) {
 				func_item->groups =
-					devm_kzalloc(&pdev->dev,
-						     func_item->ngroups * sizeof(*func_item->groups),
+					devm_kcalloc(&pdev->dev,
+						     func_item->ngroups,
+						     sizeof(*func_item->groups),
 						     GFP_KERNEL);
-				if (!func_item->groups)
+				if (!func_item->groups) {
+					kfree(pctl->functions);
 					return -ENOMEM;
+				}
 			}
 
 			func_grp = func_item->groups;
@@ -1185,7 +1195,7 @@ static int sunxi_pinctrl_setup_debounce(struct sunxi_pinctrl *pctl,
 	int i, ret;
 
 	/* Deal with old DTs that didn't have the oscillators */
-	if (of_count_phandle_with_args(node, "clocks", "#clock-cells") != 3)
+	if (of_clk_get_parent_count(node) != 3)
 		return 0;
 
 	/* If we don't have any setup, bail out */
@@ -1231,8 +1241,7 @@ static int sunxi_pinctrl_setup_debounce(struct sunxi_pinctrl *pctl,
 
 		writel(src | div << 4,
 		       pctl->membase +
-		       sunxi_irq_debounce_reg_from_bank(i,
-							pctl->desc->irq_bank_base));
+		       sunxi_irq_debounce_reg_from_bank(pctl->desc, i));
 	}
 
 	return 0;
@@ -1280,8 +1289,8 @@ int sunxi_pinctrl_init_with_variant(struct platform_device *pdev,
 		return ret;
 	}
 
-	pins = devm_kzalloc(&pdev->dev,
-			    pctl->desc->npins * sizeof(*pins),
+	pins = devm_kcalloc(&pdev->dev,
+			    pctl->desc->npins, sizeof(*pins),
 			    GFP_KERNEL);
 	if (!pins)
 		return -ENOMEM;
@@ -1360,7 +1369,8 @@ int sunxi_pinctrl_init_with_variant(struct platform_device *pdev,
 			goto gpiochip_error;
 	}
 
-	clk = devm_clk_get(&pdev->dev, NULL);
+	ret = of_clk_get_parent_count(node);
+	clk = devm_clk_get(&pdev->dev, ret == 1 ? NULL : "apb");
 	if (IS_ERR(clk)) {
 		ret = PTR_ERR(clk);
 		goto gpiochip_error;
@@ -1407,11 +1417,11 @@ int sunxi_pinctrl_init_with_variant(struct platform_device *pdev,
 
 	for (i = 0; i < pctl->desc->irq_banks; i++) {
 		/* Mask and clear all IRQs before registering a handler */
-		writel(0, pctl->membase + sunxi_irq_ctrl_reg_from_bank(i,
-						pctl->desc->irq_bank_base));
+		writel(0, pctl->membase +
+			  sunxi_irq_ctrl_reg_from_bank(pctl->desc, i));
 		writel(0xffffffff,
-		       pctl->membase + sunxi_irq_status_reg_from_bank(i,
-						pctl->desc->irq_bank_base));
+		       pctl->membase +
+		       sunxi_irq_status_reg_from_bank(pctl->desc, i));
 
 		irq_set_chained_handler_and_data(pctl->irq[i],
 						 sunxi_pinctrl_irq_handler,

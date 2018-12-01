@@ -232,6 +232,8 @@
 /* IMX lpuart has four extra unused regs located at the beginning */
 #define IMX_REG_OFF	0x10
 
+static DEFINE_IDA(fsl_lpuart_ida);
+
 struct lpuart_port {
 	struct uart_port	port;
 	struct clk		*clk;
@@ -979,7 +981,8 @@ static inline int lpuart_start_rx_dma(struct lpuart_port *sport)
 	struct circ_buf *ring = &sport->rx_ring;
 	int ret, nent;
 	int bits, baud;
-	struct tty_struct *tty = tty_port_tty_get(&sport->port.state->port);
+	struct tty_port *port = &sport->port.state->port;
+	struct tty_struct *tty = port->tty;
 	struct ktermios *termios = &tty->termios;
 
 	baud = tty_get_baud_rate(tty);
@@ -2142,8 +2145,15 @@ static int lpuart_probe(struct platform_device *pdev)
 
 	ret = of_alias_get_id(np, "serial");
 	if (ret < 0) {
-		dev_err(&pdev->dev, "failed to get alias id, errno %d\n", ret);
-		return ret;
+		ret = ida_simple_get(&fsl_lpuart_ida, 0, UART_NR, GFP_KERNEL);
+		if (ret < 0) {
+			dev_err(&pdev->dev, "port line is full, add device failed\n");
+			return ret;
+		}
+	}
+	if (ret >= ARRAY_SIZE(lpuart_ports)) {
+		dev_err(&pdev->dev, "serial%d out of range\n", ret);
+		return -EINVAL;
 	}
 	sport->port.line = ret;
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -2206,23 +2216,16 @@ static int lpuart_probe(struct platform_device *pdev)
 	if (ret)
 		goto failed_attach_port;
 
-	of_get_rs485_mode(np, &sport->port.rs485);
+	uart_get_rs485_mode(&pdev->dev, &sport->port.rs485);
 
-	if (sport->port.rs485.flags & SER_RS485_RX_DURING_TX) {
+	if (sport->port.rs485.flags & SER_RS485_RX_DURING_TX)
 		dev_err(&pdev->dev, "driver doesn't support RX during TX\n");
-		return -ENOSYS;
-	}
 
 	if (sport->port.rs485.delay_rts_before_send ||
-	    sport->port.rs485.delay_rts_after_send) {
+	    sport->port.rs485.delay_rts_after_send)
 		dev_err(&pdev->dev, "driver doesn't support RTS delays\n");
-		return -ENOSYS;
-	}
 
-	if (sport->port.rs485.flags & SER_RS485_ENABLED) {
-		sport->port.rs485.flags |= SER_RS485_RTS_ON_SEND;
-		writeb(UARTMODEM_TXRTSE, sport->port.membase + UARTMODEM);
-	}
+	lpuart_config_rs485(&sport->port, &sport->port.rs485);
 
 	sport->dma_tx_chan = dma_request_slave_channel(sport->port.dev, "tx");
 	if (!sport->dma_tx_chan)
@@ -2247,6 +2250,8 @@ static int lpuart_remove(struct platform_device *pdev)
 	struct lpuart_port *sport = platform_get_drvdata(pdev);
 
 	uart_remove_one_port(&lpuart_reg, &sport->port);
+
+	ida_simple_remove(&fsl_lpuart_ida, sport->port.line);
 
 	clk_disable_unprepare(sport->clk);
 
@@ -2386,6 +2391,7 @@ static int __init lpuart_serial_init(void)
 
 static void __exit lpuart_serial_exit(void)
 {
+	ida_destroy(&fsl_lpuart_ida);
 	platform_driver_unregister(&lpuart_driver);
 	uart_unregister_driver(&lpuart_reg);
 }

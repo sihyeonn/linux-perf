@@ -157,8 +157,8 @@ struct nouveau_drm {
 		struct nvif_object copy;
 		int mtrr;
 		int type_vram;
-		int type_host;
-		int type_ncoh;
+		int type_host[2];
+		int type_ncoh[2];
 	} ttm;
 
 	/* GEM interface support */
@@ -169,6 +169,12 @@ struct nouveau_drm {
 
 	/* synchronisation */
 	void *fence;
+
+	/* Global channel management. */
+	struct {
+		int nr;
+		u64 context_base;
+	} chan;
 
 	/* context for accelerated drm-internal operations */
 	struct nouveau_channel *cechan;
@@ -188,8 +194,6 @@ struct nouveau_drm {
 	/* modesetting */
 	struct nvbios vbios;
 	struct nouveau_display *display;
-	struct backlight_device *backlight;
-	struct list_head bl_connectors;
 	struct work_struct hpd_work;
 	struct work_struct fbcon_work;
 	int fbcon_new_state;
@@ -208,13 +212,19 @@ struct nouveau_drm {
 	bool have_disp_power_ref;
 
 	struct dev_pm_domain vga_pm_domain;
-	struct pci_dev *hdmi_device;
 };
 
 static inline struct nouveau_drm *
 nouveau_drm(struct drm_device *dev)
 {
 	return dev->dev_private;
+}
+
+static inline bool
+nouveau_drm_use_coherent_gpu_mapping(struct nouveau_drm *drm)
+{
+	struct nvif_mmu *mmu = &drm->client.mmu;
+	return !(mmu->type[drm->ttm.type_host[0]].type & NVIF_MEM_UNCACHED);
 }
 
 int nouveau_pmops_suspend(struct device *);
@@ -232,10 +242,12 @@ void nouveau_drm_device_remove(struct drm_device *dev);
 	struct nouveau_cli *_cli = (c);                                        \
 	dev_##l(_cli->drm->dev->dev, "%s: "f, _cli->name, ##a);                \
 } while(0)
+
 #define NV_FATAL(drm,f,a...) NV_PRINTK(crit, &(drm)->client, f, ##a)
 #define NV_ERROR(drm,f,a...) NV_PRINTK(err, &(drm)->client, f, ##a)
 #define NV_WARN(drm,f,a...) NV_PRINTK(warn, &(drm)->client, f, ##a)
 #define NV_INFO(drm,f,a...) NV_PRINTK(info, &(drm)->client, f, ##a)
+
 #define NV_DEBUG(drm,f,a...) do {                                              \
 	if (unlikely(drm_debug & DRM_UT_DRIVER))                               \
 		NV_PRINTK(info, &(drm)->client, f, ##a);                       \
@@ -244,6 +256,12 @@ void nouveau_drm_device_remove(struct drm_device *dev);
 	if (unlikely(drm_debug & DRM_UT_ATOMIC))                               \
 		NV_PRINTK(info, &(drm)->client, f, ##a);                       \
 } while(0)
+
+#define NV_PRINTK_ONCE(l,c,f,a...) NV_PRINTK(l##_once,c,f, ##a)
+
+#define NV_ERROR_ONCE(drm,f,a...) NV_PRINTK_ONCE(err, &(drm)->client, f, ##a)
+#define NV_WARN_ONCE(drm,f,a...) NV_PRINTK_ONCE(warn, &(drm)->client, f, ##a)
+#define NV_INFO_ONCE(drm,f,a...) NV_PRINTK_ONCE(info, &(drm)->client, f, ##a)
 
 extern int nouveau_modeset;
 
